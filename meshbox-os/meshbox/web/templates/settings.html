@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>⚙️ Paramètres</h2>
+    </div>
+</div>
+
+<!-- System Info -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>📊 Informations système</h2>
+    </div>
+    <div class="panel-body">
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Version MeshBox</span>
+                <span class="config-value">1.0.0</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Taille base de données</span>
+                <span class="config-value">{{ db_size }}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Messages stockés</span>
+                <span class="config-value">{{ stats.total_messages }}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Messages en relais</span>
+                <span class="config-value">{{ stats.relay_messages }}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Contacts</span>
+                <span class="config-value">{{ stats.total_profiles }}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Pairs rencontrés</span>
+                <span class="config-value">{{ stats.total_peers_seen }}</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Message Settings -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>📨 Messages</h2>
+    </div>
+    <div class="panel-body">
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">TTL par défaut</span>
+                <span class="config-value">7 jours (604800s)</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Taille max message</span>
+                <span class="config-value">1 Mo (1048576 octets)</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Difficulté PoW</span>
+                <span class="config-value">16 bits</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Nettoyage messages lus</span>
+                <span class="config-value">30 jours</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Intervalle sync</span>
+                <span class="config-value">30 secondes</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Max relais stockés</span>
+                <span class="config-value">10 000</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Crypto Info -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>🔐 Cryptographie</h2>
+    </div>
+    <div class="panel-body">
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Échange de clés</span>
+                <span class="config-value">Curve25519 (X25519)</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Chiffrement</span>
+                <span class="config-value">XSalsa20-Poly1305</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Signature</span>
+                <span class="config-value">Ed25519</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Hash</span>
+                <span class="config-value">SHA-256</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Bibliothèque</span>
+                <span class="config-value">libsodium (PyNaCl)</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Anti-spam</span>
+                <span class="config-value">Hashcash PoW (SHA-256)</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Maintenance -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>🧹 Maintenance</h2>
+    </div>
+    <div class="panel-body">
+        <div class="maintenance-actions">
+            <form method="POST" action="/settings/cleanup" style="display:inline">
+                <button type="submit" class="btn btn-primary" onclick="return confirm('Nettoyer les messages expirés ?')">
+                    🧹 Nettoyer les messages expirés
+                </button>
+            </form>
+            <p class="form-hint" style="margin-top: 8px">
+                Supprime les messages relais expirés et les messages lus de plus de 30 jours.
+            </p>
+        </div>
+    </div>
+</div>
+
+<!-- Daemon Services -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>🖥️ Services systemd</h2>
+    </div>
+    <div class="panel-body">
+        <div class="services-list">
+            <div class="service-item">
+                <span class="service-name">meshboxd</span>
+                <span class="service-desc">Daemon principal (réseau + sync)</span>
+                <span class="badge badge-info">Core</span>
+            </div>
+            <div class="service-item">
+                <span class="service-name">meshbox-bt</span>
+                <span class="service-desc">Bluetooth LE advertising</span>
+                <span class="badge badge-info">Bluetooth</span>
+            </div>
+            <div class="service-item">
+                <span class="service-name">meshbox-web</span>
+                <span class="service-desc">Interface web (port 8080)</span>
+                <span class="badge badge-success">Active</span>
+            </div>
+            <div class="service-item">
+                <span class="service-name">meshbox-discovery.timer</span>
+                <span class="service-desc">Nettoyage périodique (5 min)</span>
+                <span class="badge badge-info">Timer</span>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

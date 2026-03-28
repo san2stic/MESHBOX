@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>👥 Contacts</h2>
+        <span class="page-count">{{ contacts|length }} contact{{ 's' if contacts|length != 1 }}</span>
+    </div>
+    <div class="page-header-right">
+        <div class="search-box">
+            <input type="text" id="searchContacts" placeholder="Rechercher..." class="search-input" autocomplete="off">
+            <span class="search-icon">🔍</span>
+        </div>
+        <button class="btn btn-primary" onclick="document.getElementById('addContactModal').classList.add('open')">
+            + Ajouter
+        </button>
+    </div>
+</div>
+
+<div class="contacts-grid" id="contactsList">
+    {% if contacts %}
+        {% for c in contacts %}
+        <div class="contact-card" data-name="{{ c.name }}" data-fp="{{ c.fingerprint }}">
+            <div class="contact-header">
+                <div class="contact-avatar">{{ c.name[0]|upper }}</div>
+                <div class="contact-info">
+                    <h3>{{ c.name }}</h3>
+                    <span class="contact-fp" title="{{ c.fingerprint }}">🔑 {{ c.fingerprint }}</span>
+                </div>
+            </div>
+            {% if c.bio %}
+            <p class="contact-bio">{{ c.bio }}</p>
+            {% endif %}
+            <div class="contact-meta">
+                <span>📅 Vu le {{ c.last_seen_str }}</span>
+            </div>
+            <div class="contact-actions">
+                <a href="/send?to={{ c.fingerprint }}" class="btn btn-primary btn-sm">✉ Message</a>
+                <form method="POST" action="/delete-contact/{{ c.fingerprint }}" style="display:inline">
+                    <button type="submit" class="btn btn-danger-ghost btn-sm" onclick="return confirm('Supprimer {{ c.name }} ?')">🗑</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-state full-width">
+            <span class="empty-icon">👥</span>
+            <h3>Aucun contact</h3>
+            <p>Les contacts sont ajoutés automatiquement quand des pairs MeshBox sont découverts à proximité.<br>
+            Vous pouvez aussi ajouter un contact manuellement avec son profil JSON.</p>
+            <button class="btn btn-primary" onclick="document.getElementById('addContactModal').classList.add('open')">
+                + Ajouter un contact
+            </button>
+        </div>
+    {% endif %}
+</div>
+
+<!-- Add Contact Modal -->
+<div class="modal" id="addContactModal">
+    <div class="modal-overlay" onclick="this.parentElement.classList.remove('open')"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Ajouter un contact</h3>
+            <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
+        </div>
+        <form method="POST" action="/add-contact">
+            <div class="modal-body">
+                <p class="form-hint" style="margin-bottom: 15px">
+                    Collez le profil JSON exporté par un autre utilisateur MeshBox.
+                </p>
+                <textarea name="json_data" class="form-textarea" rows="8"
+                    placeholder='{
+    "fingerprint": "a1b2c3d4",
+    "name": "Alice",
+    "verify_key": "...",
+    "box_public_key": "..."
+}'></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" onclick="this.closest('.modal').classList.remove('open')">Annuler</button>
+                <button type="submit" class="btn btn-primary">Ajouter</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.getElementById('searchContacts')?.addEventListener('input', function(e) {
+        const query = e.target.value.toLowerCase();
+        document.querySelectorAll('.contact-card').forEach(card => {
+            const name = card.dataset.name.toLowerCase();
+            const fp = card.dataset.fp.toLowerCase();
+            card.style.display = (name.includes(query) || fp.includes(query)) ? '' : 'none';
+        });
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block content %}
+<!-- Stats Grid -->
+<div class="stats-grid">
+    <div class="stat-card stat-primary">
+        <div class="stat-icon">📩</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statUnread">{{ stats.unread_messages }}</span>
+            <span class="stat-label">Non lus</span>
+        </div>
+        <a href="/inbox" class="stat-link">Voir →</a>
+    </div>
+    <div class="stat-card stat-secondary">
+        <div class="stat-icon">📨</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statTotal">{{ stats.total_messages }}</span>
+            <span class="stat-label">Messages totaux</span>
+        </div>
+    </div>
+    <div class="stat-card stat-accent">
+        <div class="stat-icon">🔄</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statRelay">{{ stats.relay_messages }}</span>
+            <span class="stat-label">En relais</span>
+        </div>
+    </div>
+    <div class="stat-card stat-info">
+        <div class="stat-icon">👥</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statContacts">{{ stats.total_profiles }}</span>
+            <span class="stat-label">Contacts</span>
+        </div>
+        <a href="/contacts" class="stat-link">Gérer →</a>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-icon">📡</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statPeers">{{ stats.total_peers_seen }}</span>
+            <span class="stat-label">Pairs rencontrés</span>
+        </div>
+        <a href="/network" class="stat-link">Détails →</a>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statToday">{{ stats.messages_today }}</span>
+            <span class="stat-label">Messages aujourd'hui</span>
+        </div>
+    </div>
+    <div class="stat-card stat-info">
+        <div class="stat-icon">📁</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statFiles">{{ stats.total_files }}</span>
+            <span class="stat-label">Fichiers partagés</span>
+        </div>
+        <a href="/files" class="stat-link">Voir →</a>
+    </div>
+    <div class="stat-card {{ 'stat-danger' if stats.active_sos else '' }}">
+        <div class="stat-icon">🚨</div>
+        <div class="stat-data">
+            <span class="stat-number" id="statSOS">{{ stats.active_sos }}</span>
+            <span class="stat-label">Alertes SOS</span>
+        </div>
+        <a href="/sos" class="stat-link">Voir →</a>
+    </div>
+</div>
+
+<!-- Two Column Layout -->
+<div class="dashboard-grid">
+    <!-- Recent Messages -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>📥 Messages récents</h2>
+            <a href="/inbox" class="panel-action">Tout voir →</a>
+        </div>
+        <div class="panel-body">
+            {% if recent_messages %}
+                {% for msg in recent_messages[:5] %}
+                <a href="/read/{{ msg.message_id }}" class="message-preview {{ 'unread' if not msg.read }}">
+                    <div class="message-avatar">{{ msg.sender_name[0]|upper }}</div>
+                    <div class="message-info">
+                        <div class="message-header-row">
+                            <span class="message-sender">{{ msg.sender_name }}</span>
+                            <span class="message-time">{{ msg.time_ago }}</span>
+                        </div>
+                        <span class="message-snippet">Message chiffré #{{ msg.message_id[:8] }}</span>
+                    </div>
+                    {% if not msg.read %}<span class="unread-dot"></span>{% endif %}
+                </a>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state small">
+                    <span class="empty-icon">📭</span>
+                    <p>Aucun message reçu</p>
+                    <span class="empty-hint">Les messages apparaîtront ici quand d'autres nœuds MeshBox vous enverront des messages chiffrés.</span>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Recent Activity -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>🌐 Activité réseau</h2>
+            <a href="/network" class="panel-action">Détails →</a>
+        </div>
+        <div class="panel-body">
+            {% if recent_peers %}
+                {% for peer in recent_peers[:8] %}
+                <div class="peer-activity">
+                    <div class="peer-icon">{{ '📶' if peer.connection_type == 'wifi' else '🔵' }}</div>
+                    <div class="peer-info">
+                        <span class="peer-name">{{ peer.peer_name or peer.fingerprint[:12] }}</span>
+                        <span class="peer-meta">{{ peer.connection_type|upper }} · {{ peer.time_ago }}</span>
+                    </div>
+                    <span class="peer-badge">{{ peer.messages_exchanged }} msg</span>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state small">
+                    <span class="empty-icon">📡</span>
+                    <p>Aucune activité réseau</p>
+                    <span class="empty-hint">Quand des pairs MeshBox seront à portée WiFi ou Bluetooth, ils apparaîtront ici.</span>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="panel" style="margin-bottom: 24px;">
+    <div class="panel-header">
+        <h2>⚡ Actions rapides</h2>
+    </div>
+    <div class="panel-body">
+        <div class="quick-actions-grid">
+            <a href="/send" class="quick-action">
+                <span class="quick-action-icon">✏️</span>
+                <span class="quick-action-label">Nouveau message</span>
+            </a>
+            <a href="/files" class="quick-action">
+                <span class="quick-action-icon">📁</span>
+                <span class="quick-action-label">Partager un fichier</span>
+            </a>
+            <a href="/channels" class="quick-action">
+                <span class="quick-action-icon">📢</span>
+                <span class="quick-action-label">Canaux</span>
+            </a>
+            <a href="/map" class="quick-action">
+                <span class="quick-action-icon">🗺️</span>
+                <span class="quick-action-label">Carte</span>
+            </a>
+            <a href="/sos" class="quick-action">
+                <span class="quick-action-icon">🚨</span>
+                <span class="quick-action-label">SOS</span>
+            </a>
+            <a href="/qr" class="quick-action">
+                <span class="quick-action-icon">📱</span>
+                <span class="quick-action-label">QR Code</span>
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- How it works -->
+<div class="panel info-panel">
+    <div class="panel-header">
+        <h2>🔐 Communication décentralisée et chiffrée</h2>
+    </div>
+    <div class="panel-body">
+        <div class="features-grid">
+            <div class="feature">
+                <span class="feature-icon">📡</span>
+                <h3>Diffusion</h3>
+                <p>Votre Pi diffuse son identité via WiFi Ad-Hoc et Bluetooth LE</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🔒</span>
+                <h3>Chiffrement E2E</h3>
+                <p>Messages et fichiers chiffrés avec Curve25519 + XSalsa20-Poly1305</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🔄</span>
+                <h3>Store & Forward</h3>
+                <p>Messages et fichiers relayés de nœud en nœud jusqu'au destinataire</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">📁</span>
+                <h3>Partage fichiers</h3>
+                <p>Envoyez des fichiers chiffrés jusqu'à 10 Mo via le réseau mesh</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🗺️</span>
+                <h3>Carte réseau</h3>
+                <p>Visualisez les nœuds sur une carte et partagez votre position</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🚨</span>
+                <h3>SOS d'urgence</h3>
+                <p>Diffusez une alerte d'urgence à tous les nœuds du réseau</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh stats every 10 seconds
+    setInterval(async () => {
+        try {
+            const resp = await fetch('/api/status');
+            const data = await resp.json();
+            document.getElementById('statUnread').textContent = data.unread_messages;
+            document.getElementById('statTotal').textContent = data.total_messages;
+            document.getElementById('statRelay').textContent = data.relay_messages;
+            document.getElementById('statContacts').textContent = data.total_profiles;
+            document.getElementById('statPeers').textContent = data.total_peers_seen;
+            document.getElementById('statToday').textContent = data.messages_today;
+            document.getElementById('statFiles').textContent = data.total_files;
+            document.getElementById('statSOS').textContent = data.active_sos;
+        } catch(e) {}
+    }, 10000);
+</script>
+{% endblock %}

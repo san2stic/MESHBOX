@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>📢 Canaux</h2>
+        <span class="page-count">{{ channels|length }} canal{{ 'aux' if channels|length > 1 else '' }}</span>
+    </div>
+    <div class="page-header-right">
+        <button class="btn btn-primary" onclick="document.getElementById('createChannelModal').classList.add('open')">
+            + Créer un canal
+        </button>
+    </div>
+</div>
+
+<!-- Create Channel Modal -->
+<div class="modal" id="createChannelModal">
+    <div class="modal-overlay" onclick="this.parentElement.classList.remove('open')"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>📢 Nouveau canal</h3>
+            <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
+        </div>
+        <form method="POST" action="/channels/create">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Nom du canal</label>
+                    <input type="text" name="name" class="form-input" placeholder="Ex: général, annonces, entraide..." required minlength="2" maxlength="50">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Description (optionnel)</label>
+                    <textarea name="description" class="form-textarea" rows="2" placeholder="À quoi sert ce canal..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" onclick="this.closest('.modal').classList.remove('open')">Annuler</button>
+                <button type="submit" class="btn btn-primary">Créer</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if channels %}
+<div class="channels-grid">
+    {% for ch in channels %}
+    <a href="/channels/{{ ch.channel_id }}" class="channel-card">
+        <div class="channel-icon">#</div>
+        <div class="channel-info">
+            <h3>{{ ch.name }}</h3>
+            {% if ch.description %}<p class="channel-desc">{{ ch.description }}</p>{% endif %}
+            <div class="channel-meta">
+                <span>📝 {{ ch.msg_count or 0 }} message{{ 's' if (ch.msg_count or 0) != 1 }}</span>
+                <span>· Créé par {{ ch.creator_name or ch.creator_fingerprint[:12] }}</span>
+                <span>· {{ ch.time_ago }}</span>
+            </div>
+        </div>
+        <span class="channel-arrow">→</span>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="panel">
+    <div class="panel-body">
+        <div class="empty-state">
+            <span class="empty-icon">📢</span>
+            <h3>Aucun canal</h3>
+            <p>Les canaux permettent de créer des espaces de discussion publics sur le réseau mesh.<br>
+            Créez un canal pour permettre à tous les nœuds de communiquer.</p>
+            <button class="btn btn-primary" onclick="document.getElementById('createChannelModal').classList.add('open')">
+                + Créer le premier canal
+            </button>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="panel info-panel" style="margin-top: 24px;">
+    <div class="panel-header">
+        <h2>📢 Tableau d'affichage décentralisé</h2>
+    </div>
+    <div class="panel-body">
+        <div class="features-grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="feature">
+                <span class="feature-icon">🌐</span>
+                <h3>Public</h3>
+                <p>Les canaux sont visibles par tous les nœuds du réseau mesh</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🔄</span>
+                <h3>Synchronisé</h3>
+                <p>Les messages se propagent de nœud en nœud automatiquement</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">💬</span>
+                <h3>Forum mesh</h3>
+                <p>Discutez, partagez des infos et organisez-vous sans internet</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

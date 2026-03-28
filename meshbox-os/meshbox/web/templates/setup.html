@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshBox — Configuration initiale</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+    <style>
+        /* ── Onboarding Layout ── */
+        .onboard-bg {
+            min-height: 100vh;
+            background: var(--bg-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .onboard-bg::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background:
+                radial-gradient(ellipse at 20% 50%, rgba(0, 255, 136, 0.03) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 50%, rgba(0, 212, 255, 0.03) 0%, transparent 50%);
+            animation: bgPulse 8s ease-in-out infinite alternate;
+        }
+
+        @keyframes bgPulse {
+            0% { transform: scale(1) rotate(0deg); }
+            100% { transform: scale(1.1) rotate(2deg); }
+        }
+
+        .onboard-container {
+            width: 100%;
+            max-width: 560px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ── Logo Header ── */
+        .onboard-logo {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .onboard-logo .logo-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .onboard-logo h1 {
+            font-family: var(--font-mono);
+            font-size: 28px;
+            color: var(--accent-green);
+            letter-spacing: 2px;
+            margin-bottom: 4px;
+        }
+
+        .onboard-logo .subtitle {
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* ── Steps Indicator ── */
+        .steps-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 32px;
+        }
+
+        .step-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--border-secondary);
+            transition: all 0.3s ease;
+        }
+
+        .step-dot.active {
+            background: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+            width: 12px;
+            height: 12px;
+        }
+
+        .step-dot.completed {
+            background: var(--accent-green-dim);
+        }
+
+        .step-line {
+            width: 40px;
+            height: 2px;
+            background: var(--border-secondary);
+            transition: background 0.3s ease;
+        }
+
+        .step-line.completed {
+            background: var(--accent-green-dim);
+        }
+
+        /* ── Card ── */
+        .onboard-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-lg);
+            padding: 40px;
+            box-shadow: var(--shadow);
+        }
+
+        /* ── Steps (show/hide) ── */
+        .onboard-step {
+            display: none;
+        }
+
+        .onboard-step.active {
+            display: block;
+            animation: stepIn 0.3s ease;
+        }
+
+        @keyframes stepIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Step Header ── */
+        .step-header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+
+        .step-header .step-icon {
+            font-size: 40px;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .step-header h2 {
+            color: var(--text-heading);
+            font-size: 20px;
+            margin-bottom: 6px;
+        }
+
+        .step-header p {
+            color: var(--text-secondary);
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        /* ── Form Fields ── */
+        .onboard-field {
+            margin-bottom: 20px;
+        }
+
+        .onboard-field label {
+            display: block;
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        .onboard-field input,
+        .onboard-field textarea,
+        .onboard-field select {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius);
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: var(--font-sans);
+            transition: border-color var(--transition);
+        }
+
+        .onboard-field input:focus,
+        .onboard-field textarea:focus,
+        .onboard-field select:focus {
+            outline: none;
+            border-color: var(--accent-green);
+            box-shadow: 0 0 0 2px var(--accent-green-bg);
+        }
+
+        .onboard-field textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .onboard-field .field-hint {
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-top: 4px;
+        }
+
+        .onboard-field .field-error {
+            color: var(--accent-red);
+            font-size: 11px;
+            margin-top: 4px;
+            display: none;
+        }
+
+        /* ── Buttons ── */
+        .onboard-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 28px;
+            gap: 12px;
+        }
+
+        .btn-onboard {
+            padding: 12px 28px;
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            border: none;
+            font-family: var(--font-sans);
+        }
+
+        .btn-primary {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-green-dim);
+            box-shadow: 0 0 16px rgba(0, 255, 136, 0.3);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-secondary);
+        }
+
+        .btn-secondary:hover {
+            color: var(--text-primary);
+            border-color: var(--text-muted);
+        }
+
+        .btn-skip {
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 12px;
+            padding: 8px 16px;
+        }
+
+        .btn-skip:hover {
+            color: var(--text-secondary);
+        }
+
+        /* ── Welcome ASCII Art ── */
+        .welcome-art {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            line-height: 1.2;
+            color: var(--accent-green);
+            text-align: center;
+            white-space: pre;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+
+        /* ── Features list ── */
+        .features-list {
+            list-style: none;
+            margin: 20px 0;
+        }
+
+        .features-list li {
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-primary);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .features-list li:last-child {
+            border-bottom: none;
+        }
+
+        .features-list .feature-icon {
+            font-size: 18px;
+            width: 32px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .features-list .feature-text strong {
+            color: var(--text-primary);
+            display: block;
+            font-size: 14px;
+            margin-bottom: 2px;
+        }
+
+        /* ── Summary card ── */
+        .summary-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin: 16px 0;
+        }
+
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-primary);
+        }
+
+        .summary-row:last-child {
+            border-bottom: none;
+        }
+
+        .summary-label {
+            color: var(--text-muted);
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+
+        .summary-value {
+            color: var(--accent-green);
+            font-family: var(--font-mono);
+            font-size: 13px;
+        }
+
+        /* ── Generating keys animation ── */
+        .keygen-status {
+            text-align: center;
+            padding: 24px 0;
+        }
+
+        .keygen-spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid var(--border-secondary);
+            border-top-color: var(--accent-green);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .keygen-status p {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .keygen-status .keygen-done {
+            display: none;
+        }
+
+        .keygen-status.done .keygen-spinner {
+            display: none;
+        }
+
+        .keygen-status.done .keygen-done {
+            display: block;
+        }
+
+        .keygen-done .done-icon {
+            font-size: 48px;
+            display: block;
+            margin-bottom: 12px;
+        }
+
+        .keygen-done p {
+            color: var(--accent-green);
+            font-weight: 600;
+        }
+
+        /* ── Success final ── */
+        .success-section {
+            text-align: center;
+        }
+
+        .success-section .success-icon {
+            font-size: 64px;
+            display: block;
+            margin-bottom: 16px;
+        }
+
+        .success-urls {
+            background: var(--bg-tertiary);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin: 20px 0;
+        }
+
+        .success-urls .url-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            font-family: var(--font-mono);
+            font-size: 13px;
+        }
+
+        .success-urls .url-label {
+            color: var(--text-muted);
+            min-width: 60px;
+        }
+
+        .success-urls .url-value {
+            color: var(--accent-cyan);
+        }
+
+        /* ── Password strength ── */
+        .password-strength {
+            height: 4px;
+            background: var(--border-secondary);
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .password-strength-bar {
+            height: 100%;
+            width: 0%;
+            border-radius: 2px;
+            transition: width 0.3s, background 0.3s;
+        }
+
+        .password-strength-bar.weak { width: 33%; background: var(--accent-red); }
+        .password-strength-bar.medium { width: 66%; background: var(--accent-amber); }
+        .password-strength-bar.strong { width: 100%; background: var(--accent-green); }
+
+        /* ── Responsive ── */
+        @media (max-width: 600px) {
+            .onboard-card {
+                padding: 24px 20px;
+            }
+            .welcome-art {
+                font-size: 7px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="onboard-bg">
+        <div class="onboard-container">
+            <!-- Logo -->
+            <div class="onboard-logo">
+                <span class="logo-icon">📡</span>
+                <h1>MESHBOX OS</h1>
+                <span class="subtitle">Configuration initiale</span>
+            </div>
+
+            <!-- Steps indicator -->
+            <div class="steps-indicator">
+                <div class="step-dot active" id="dot-1"></div>
+                <div class="step-line" id="line-1"></div>
+                <div class="step-dot" id="dot-2"></div>
+                <div class="step-line" id="line-2"></div>
+                <div class="step-dot" id="dot-3"></div>
+                <div class="step-line" id="line-3"></div>
+                <div class="step-dot" id="dot-4"></div>
+            </div>
+
+            <div class="onboard-card">
+                <!-- ════════════════════════════════════════ -->
+                <!-- STEP 1: Welcome -->
+                <!-- ════════════════════════════════════════ -->
+                <div class="onboard-step active" id="step-1">
+                    <div class="welcome-art">
+ ╔══════════════════════════════════════════╗
+ ║      ⬡  M E S H B O X   O S            ║
+ ║                                          ║
+ ║    Communication décentralisée           ║
+ ║    & chiffrée de bout en bout            ║
+ ╚══════════════════════════════════════════╝
+                    </div>
+
+                    <div class="step-header">
+                        <h2>Bienvenue sur MeshBox</h2>
+                        <p>Votre nœud de communication mesh est presque prêt. Configurons votre identité en quelques étapes.</p>
+                    </div>
+
+                    <ul class="features-list">
+                        <li>
+                            <span class="feature-icon">🔐</span>
+                            <div class="feature-text">
+                                <strong>Chiffrement E2E</strong>
+                                Curve25519 + XSalsa20-Poly1305
+                            </div>
+                        </li>
+                        <li>
+                            <span class="feature-icon">📡</span>
+                            <div class="feature-text">
+                                <strong>Réseau Mesh</strong>
+                                WiFi ad-hoc & Bluetooth LE
+                            </div>
+                        </li>
+                        <li>
+                            <span class="feature-icon">🔄</span>
+                            <div class="feature-text">
+                                <strong>Store & Forward</strong>
+                                Les messages sont relayés jusqu'à destination
+                            </div>
+                        </li>
+                        <li>
+                            <span class="feature-icon">🛡️</span>
+                            <div class="feature-text">
+                                <strong>Anti-spam</strong>
+                                Preuve de travail Hashcash intégrée
+                            </div>
+                        </li>
+                    </ul>
+
+                    <div class="onboard-actions" style="justify-content: flex-end;">
+                        <button class="btn-onboard btn-primary" onclick="goToStep(2)">Commencer →</button>
+                    </div>
+                </div>
+
+                <!-- ════════════════════════════════════════ -->
+                <!-- STEP 2: Create Identity -->
+                <!-- ════════════════════════════════════════ -->
+                <div class="onboard-step" id="step-2">
+                    <div class="step-header">
+                        <span class="step-icon">🔑</span>
+                        <h2>Créer votre identité</h2>
+                        <p>Choisissez un nom pour votre nœud. Une paire de clés cryptographiques sera générée automatiquement.</p>
+                    </div>
+
+                    <form id="identityForm">
+                        <div class="onboard-field">
+                            <label for="nodeName">Nom du nœud *</label>
+                            <input type="text" id="nodeName" name="name" placeholder="Ex: Alice, Bob, MonNœud..."
+                                   required maxlength="32" autocomplete="off">
+                            <div class="field-hint">3-32 caractères. Visible par les autres nœuds du réseau.</div>
+                            <div class="field-error" id="nameError">Le nom doit contenir entre 3 et 32 caractères.</div>
+                        </div>
+
+                        <div class="onboard-field">
+                            <label for="nodeBio">Bio (optionnel)</label>
+                            <textarea id="nodeBio" name="bio" placeholder="Une courte description..."
+                                      maxlength="160" rows="3"></textarea>
+                            <div class="field-hint">160 caractères max.</div>
+                        </div>
+                    </form>
+
+                    <div class="onboard-actions">
+                        <button class="btn-onboard btn-secondary" onclick="goToStep(1)">← Retour</button>
+                        <button class="btn-onboard btn-primary" onclick="validateIdentity()">Suivant →</button>
+                    </div>
+                </div>
+
+                <!-- ════════════════════════════════════════ -->
+                <!-- STEP 3: System Password -->
+                <!-- ════════════════════════════════════════ -->
+                <div class="onboard-step" id="step-3">
+                    <div class="step-header">
+                        <span class="step-icon">🛡️</span>
+                        <h2>Mot de passe système</h2>
+                        <p>Définissez un mot de passe pour sécuriser l'accès à votre interface web MeshBox.</p>
+                    </div>
+
+                    <form id="passwordForm">
+                        <div class="onboard-field">
+                            <label for="password">Mot de passe *</label>
+                            <input type="password" id="password" name="password" placeholder="••••••••"
+                                   required minlength="6" autocomplete="new-password">
+                            <div class="password-strength">
+                                <div class="password-strength-bar" id="strengthBar"></div>
+                            </div>
+                            <div class="field-hint">Minimum 6 caractères.</div>
+                            <div class="field-error" id="passwordError"></div>
+                        </div>
+
+                        <div class="onboard-field">
+                            <label for="passwordConfirm">Confirmer le mot de passe *</label>
+                            <input type="password" id="passwordConfirm" name="password_confirm"
+                                   placeholder="••••••••" required autocomplete="new-password">
+                            <div class="field-error" id="confirmError">Les mots de passe ne correspondent pas.</div>
+                        </div>
+                    </form>
+
+                    <div class="onboard-actions">
+                        <button class="btn-onboard btn-secondary" onclick="goToStep(2)">← Retour</button>
+                        <div>
+                            <button class="btn-onboard btn-skip" onclick="skipPassword()">Passer</button>
+                            <button class="btn-onboard btn-primary" onclick="validatePassword()">Suivant →</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ════════════════════════════════════════ -->
+                <!-- STEP 4: Summary & Create -->
+                <!-- ════════════════════════════════════════ -->
+                <div class="onboard-step" id="step-4">
+                    <div id="summaryView">
+                        <div class="step-header">
+                            <span class="step-icon">⬡</span>
+                            <h2>Tout est prêt</h2>
+                            <p>Vérifiez vos paramètres, puis lancez la création de votre identité.</p>
+                        </div>
+
+                        <div class="summary-card">
+                            <div class="summary-row">
+                                <span class="summary-label">Nom</span>
+                                <span class="summary-value" id="summaryName">—</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Bio</span>
+                                <span class="summary-value" id="summaryBio">—</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Mot de passe</span>
+                                <span class="summary-value" id="summaryPassword">—</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Chiffrement</span>
+                                <span class="summary-value">Curve25519 + Ed25519</span>
+                            </div>
+                        </div>
+
+                        <div class="onboard-actions">
+                            <button class="btn-onboard btn-secondary" onclick="goToStep(3)">← Retour</button>
+                            <button class="btn-onboard btn-primary" id="createBtn" onclick="createIdentity()">
+                                🔑 Créer mon identité
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Key generation animation -->
+                    <div class="keygen-status" id="keygenStatus" style="display: none;">
+                        <div class="keygen-spinner"></div>
+                        <p id="keygenText">Génération des clés cryptographiques...</p>
+                    </div>
+                </div>
+
+                <!-- ════════════════════════════════════════ -->
+                <!-- STEP 5: Success -->
+                <!-- ════════════════════════════════════════ -->
+                <div class="onboard-step" id="step-5">
+                    <div class="success-section">
+                        <span class="success-icon">🎉</span>
+                        <h2 style="color: var(--accent-green); margin-bottom: 8px;">Configuration terminée !</h2>
+                        <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">
+                            Votre nœud MeshBox est configuré et prêt à communiquer.
+                        </p>
+
+                        <div class="summary-card">
+                            <div class="summary-row">
+                                <span class="summary-label">Identité</span>
+                                <span class="summary-value" id="finalName">—</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Fingerprint</span>
+                                <span class="summary-value" id="finalFingerprint">—</span>
+                            </div>
+                        </div>
+
+                        <div class="success-urls">
+                            <div class="url-row">
+                                <span class="url-label">Web</span>
+                                <span class="url-value">http://meshbox.local:8080</span>
+                            </div>
+                            <div class="url-row">
+                                <span class="url-label">WiFi</span>
+                                <span class="url-value">MeshBox (10.42.0.1)</span>
+                            </div>
+                            <div class="url-row">
+                                <span class="url-label">CLI</span>
+                                <span class="url-value">meshbox --help</span>
+                            </div>
+                        </div>
+
+                        <div class="onboard-actions" style="justify-content: center;">
+                            <a href="/" class="btn-onboard btn-primary" style="text-decoration: none;">
+                                Accéder au Dashboard →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentStep = 1;
+        let setupData = {
+            name: '',
+            bio: '',
+            password: '',
+            hasPassword: false
+        };
+
+        function goToStep(step) {
+            // Hide current
+            document.getElementById('step-' + currentStep).classList.remove('active');
+
+            // Update dots
+            for (let i = 1; i <= 4; i++) {
+                const dot = document.getElementById('dot-' + i);
+                dot.classList.remove('active', 'completed');
+                if (i < step) dot.classList.add('completed');
+                if (i === step) dot.classList.add('active');
+
+                if (i < 4) {
+                    const line = document.getElementById('line-' + i);
+                    line.classList.toggle('completed', i < step);
+                }
+            }
+
+            // Show new step
+            currentStep = step;
+            document.getElementById('step-' + step).classList.add('active');
+
+            // Update summary if going to step 4
+            if (step === 4) {
+                updateSummary();
+            }
+        }
+
+        function validateIdentity() {
+            const name = document.getElementById('nodeName').value.trim();
+            const nameError = document.getElementById('nameError');
+
+            if (name.length < 3 || name.length > 32) {
+                nameError.style.display = 'block';
+                document.getElementById('nodeName').focus();
+                return;
+            }
+
+            nameError.style.display = 'none';
+            setupData.name = name;
+            setupData.bio = document.getElementById('nodeBio').value.trim();
+            goToStep(3);
+        }
+
+        function validatePassword() {
+            const pw = document.getElementById('password').value;
+            const confirm = document.getElementById('passwordConfirm').value;
+            const pwError = document.getElementById('passwordError');
+            const confirmError = document.getElementById('confirmError');
+
+            pwError.style.display = 'none';
+            confirmError.style.display = 'none';
+
+            if (pw.length < 6) {
+                pwError.textContent = 'Le mot de passe doit contenir au moins 6 caractères.';
+                pwError.style.display = 'block';
+                return;
+            }
+
+            if (pw !== confirm) {
+                confirmError.style.display = 'block';
+                return;
+            }
+
+            setupData.password = pw;
+            setupData.hasPassword = true;
+            goToStep(4);
+        }
+
+        function skipPassword() {
+            setupData.password = '';
+            setupData.hasPassword = false;
+            goToStep(4);
+        }
+
+        function updateSummary() {
+            document.getElementById('summaryName').textContent = setupData.name;
+            document.getElementById('summaryBio').textContent = setupData.bio || '(aucune)';
+            document.getElementById('summaryPassword').textContent = setupData.hasPassword ? '••••••••' : 'Non défini';
+        }
+
+        // Password strength indicator
+        document.getElementById('password').addEventListener('input', function() {
+            const pw = this.value;
+            const bar = document.getElementById('strengthBar');
+            bar.className = 'password-strength-bar';
+
+            if (pw.length === 0) {
+                bar.style.width = '0%';
+                return;
+            }
+
+            let score = 0;
+            if (pw.length >= 6) score++;
+            if (pw.length >= 10) score++;
+            if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+            if (/\d/.test(pw)) score++;
+            if (/[^A-Za-z0-9]/.test(pw)) score++;
+
+            if (score <= 2) bar.classList.add('weak');
+            else if (score <= 3) bar.classList.add('medium');
+            else bar.classList.add('strong');
+        });
+
+        function createIdentity() {
+            const btn = document.getElementById('createBtn');
+            btn.disabled = true;
+            btn.textContent = 'Création en cours...';
+
+            // Show keygen animation
+            document.getElementById('summaryView').style.display = 'none';
+            document.getElementById('keygenStatus').style.display = 'block';
+
+            const steps = [
+                'Génération de la paire de clés Curve25519...',
+                'Création de la clé de signature Ed25519...',
+                'Calcul du fingerprint...',
+                'Sauvegarde du profil...',
+                'Configuration terminée !'
+            ];
+
+            let stepIdx = 0;
+            const keygenText = document.getElementById('keygenText');
+
+            const interval = setInterval(function() {
+                stepIdx++;
+                if (stepIdx < steps.length) {
+                    keygenText.textContent = steps[stepIdx];
+                }
+            }, 600);
+
+            // Send to server
+            fetch('/setup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(setupData)
+            })
+            .then(res => res.json())
+            .then(data => {
+                clearInterval(interval);
+
+                if (data.success) {
+                    // Show success after animation
+                    setTimeout(function() {
+                        document.getElementById('keygenStatus').style.display = 'none';
+                        document.getElementById('finalName').textContent = data.name;
+                        document.getElementById('finalFingerprint').textContent = data.fingerprint || '—';
+
+                        // Go to step 5 (success)
+                        document.getElementById('step-4').classList.remove('active');
+                        document.getElementById('step-5').classList.add('active');
+
+                        // Mark all dots completed
+                        for (let i = 1; i <= 4; i++) {
+                            document.getElementById('dot-' + i).classList.add('completed');
+                            document.getElementById('dot-' + i).classList.remove('active');
+                            if (i < 4) document.getElementById('line-' + i).classList.add('completed');
+                        }
+                    }, 800);
+                } else {
+                    clearInterval(interval);
+                    document.getElementById('keygenStatus').style.display = 'none';
+                    document.getElementById('summaryView').style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = '🔑 Créer mon identité';
+                    alert('Erreur: ' + (data.error || 'Impossible de créer le profil'));
+                }
+            })
+            .catch(err => {
+                clearInterval(interval);
+                document.getElementById('keygenStatus').style.display = 'none';
+                document.getElementById('summaryView').style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = '🔑 Créer mon identité';
+                alert('Erreur de connexion: ' + err.message);
+            });
+        }
+
+        // Focus first field when entering step 2
+        const observer = new MutationObserver(function(mutations) {
+            mutations.forEach(function(m) {
+                if (m.target.id === 'step-2' && m.target.classList.contains('active')) {
+                    document.getElementById('nodeName').focus();
+                }
+                if (m.target.id === 'step-3' && m.target.classList.contains('active')) {
+                    document.getElementById('password').focus();
+                }
+            });
+        });
+
+        document.querySelectorAll('.onboard-step').forEach(function(el) {
+            observer.observe(el, { attributes: true, attributeFilter: ['class'] });
+        });
+    </script>
+</body>
+</html>

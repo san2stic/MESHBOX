@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>📤 Messages envoyés</h2>
+        <span class="page-count">{{ messages|length }} message{{ 's' if messages|length != 1 }}</span>
+    </div>
+</div>
+
+<div class="message-list">
+    {% if messages %}
+        {% for msg in messages %}
+        <div class="message-row sent">
+            <div class="message-row-content">
+                <div class="message-avatar avatar-sent">
+                    {{ msg.recipient_name[0]|upper }}
+                </div>
+                <div class="message-content">
+                    <div class="message-top">
+                        <span class="message-sender">→ {{ msg.recipient_name }}</span>
+                        <span class="message-time">{{ msg.time }}</span>
+                    </div>
+                    <div class="message-bottom">
+                        <span class="message-id">🔐 #{{ msg.message_id[:8] }}…</span>
+                        {% if msg.delivered %}
+                        <span class="badge badge-success">Livré</span>
+                        {% else %}
+                        <span class="badge badge-warning">En transit</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-state">
+            <span class="empty-icon">📤</span>
+            <h3>Aucun message envoyé</h3>
+            <p>Vos messages envoyés apparaîtront ici.</p>
+            <a href="/send" class="btn btn-primary">Composer un message</a>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

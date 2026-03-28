@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshBox — {{ title|default('Dashboard') }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+</head>
+<body>
+    <!-- Mobile overlay -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">📡</div>
+                <div class="brand-text">
+                    <h1>MeshBox</h1>
+                    <span class="brand-version">v1.0.0</span>
+                </div>
+                <button class="sidebar-close" id="sidebarClose">✕</button>
+            </div>
+
+            {% if profile %}
+            <div class="sidebar-profile">
+                <div class="profile-avatar">{{ profile.name[0]|upper if profile.name else '?' }}</div>
+                <div class="profile-info">
+                    <span class="profile-name">{{ profile.name }}</span>
+                    <span class="profile-fp">{{ profile.fingerprint }}</span>
+                </div>
+                <div class="profile-status">
+                    <span class="status-dot online" title="Node actif"></span>
+                </div>
+            </div>
+            {% endif %}
+
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <span class="nav-label">Principal</span>
+                    <a href="/" class="nav-item {{ 'active' if active == 'dashboard' }}">
+                        <span class="nav-icon">⬡</span>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="/inbox" class="nav-item {{ 'active' if active == 'inbox' }}">
+                        <span class="nav-icon">📥</span>
+                        <span>Messages</span>
+                        {% if unread_count %}<span class="nav-badge">{{ unread_count }}</span>{% endif %}
+                    </a>
+                    <a href="/outbox" class="nav-item {{ 'active' if active == 'outbox' }}">
+                        <span class="nav-icon">📤</span>
+                        <span>Envoyés</span>
+                    </a>
+                    <a href="/send" class="nav-item {{ 'active' if active == 'send' }}">
+                        <span class="nav-icon">✏️</span>
+                        <span>Composer</span>
+                    </a>
+                </div>
+                <div class="nav-section">
+                    <span class="nav-label">Partage</span>
+                    <a href="/files" class="nav-item {{ 'active' if active == 'files' }}">
+                        <span class="nav-icon">📁</span>
+                        <span>Fichiers</span>
+                    </a>
+                    <a href="/channels" class="nav-item {{ 'active' if active == 'channels' }}">
+                        <span class="nav-icon">📢</span>
+                        <span>Canaux</span>
+                    </a>
+                </div>
+                <div class="nav-section">
+                    <span class="nav-label">Réseau</span>
+                    <a href="/contacts" class="nav-item {{ 'active' if active == 'contacts' }}">
+                        <span class="nav-icon">👥</span>
+                        <span>Contacts</span>
+                    </a>
+                    <a href="/network" class="nav-item {{ 'active' if active == 'network' }}">
+                        <span class="nav-icon">🌐</span>
+                        <span>Réseau</span>
+                    </a>
+                    <a href="/map" class="nav-item {{ 'active' if active == 'map' }}">
+                        <span class="nav-icon">🗺️</span>
+                        <span>Carte</span>
+                    </a>
+                    <a href="/sos" class="nav-item {{ 'active' if active == 'sos' }}">
+                        <span class="nav-icon">🚨</span>
+                        <span>SOS</span>
+                        {% if sos_count %}<span class="nav-badge sos-badge">{{ sos_count }}</span>{% endif %}
+                    </a>
+                </div>
+                <div class="nav-section">
+                    <span class="nav-label">Système</span>
+                    <a href="/profile" class="nav-item {{ 'active' if active == 'profile' }}">
+                        <span class="nav-icon">🔑</span>
+                        <span>Profil & Clés</span>
+                    </a>
+                    <a href="/qr" class="nav-item {{ 'active' if active == 'qr' }}">
+                        <span class="nav-icon">📱</span>
+                        <span>QR Code</span>
+                    </a>
+                    <a href="/settings" class="nav-item {{ 'active' if active == 'settings' }}">
+                        <span class="nav-icon">⚙️</span>
+                        <span>Paramètres</span>
+                    </a>
+                </div>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="node-status">
+                    <span class="status-dot online"></span>
+                    <span>Node actif</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="topbar">
+                <button class="topbar-menu" id="menuToggle">☰</button>
+                <div class="topbar-breadcrumb">
+                    <span class="breadcrumb-page">{{ title|default('Dashboard') }}</span>
+                </div>
+                <div class="topbar-actions">
+                    <a href="/send" class="topbar-btn" title="Nouveau message">✏️ Composer</a>
+                    <div class="topbar-indicator" id="networkIndicator" title="Statut réseau">
+                        <span class="status-dot online"></span>
+                        <span id="peerCount">—</span> pairs
+                    </div>
+                </div>
+            </header>
+
+            <div class="content">
+                {% if alert %}
+                <div class="alert alert-{{ alert_type|default('info') }}" id="flashAlert">
+                    <span class="alert-icon">
+                        {% if alert_type == 'success' %}✓{% elif alert_type == 'error' %}✗{% else %}ℹ{% endif %}
+                    </span>
+                    <span>{{ alert }}</span>
+                    <button class="alert-close" onclick="this.parentElement.remove()">✕</button>
+                </div>
+                {% endif %}
+
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

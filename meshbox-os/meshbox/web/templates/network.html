@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>🌐 Réseau Mesh</h2>
+    </div>
+</div>
+
+<!-- Network Stats -->
+<div class="stats-grid small">
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ stats.total_peers_seen }}</span>
+            <span class="stat-label">Pairs rencontrés (total)</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ stats.peers_today }}</span>
+            <span class="stat-label">Pairs aujourd'hui</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ stats.relay_messages }}</span>
+            <span class="stat-label">Messages en transit</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ stats.total_profiles }}</span>
+            <span class="stat-label">Nœuds connus</span>
+        </div>
+    </div>
+</div>
+
+<!-- Peer History -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>📡 Activité récente des pairs</h2>
+    </div>
+    <div class="panel-body">
+        {% if peers %}
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Type</th>
+                        <th>Adresse IP</th>
+                        <th>Messages</th>
+                        <th>Dernière vue</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for peer in peers %}
+                    <tr>
+                        <td>
+                            <div class="table-cell-primary">
+                                <span class="peer-indicator {{ peer.connection_type }}"></span>
+                                {{ peer.peer_name or 'Inconnu' }}
+                            </div>
+                            <span class="table-cell-secondary">{{ peer.fingerprint }}</span>
+                        </td>
+                        <td>
+                            <span class="badge badge-{{ 'primary' if peer.connection_type == 'wifi' else 'info' }}">
+                                {{ '📶 WiFi' if peer.connection_type == 'wifi' else '🔵 BLE' }}
+                            </span>
+                        </td>
+                        <td><code>{{ peer.ip_address or '—' }}</code></td>
+                        <td>{{ peer.messages_exchanged }}</td>
+                        <td>{{ peer.time_ago }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">📡</span>
+            <p>Aucun pair détecté</p>
+            <span class="empty-hint">Assurez-vous que le daemon meshboxd est actif et qu'il y a d'autres nœuds MeshBox à portée WiFi ou Bluetooth.</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Network Topology Visualizer -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>🗺️ Topologie du réseau</h2>
+    </div>
+    <div class="panel-body">
+        <div class="network-viz" id="networkViz">
+            <div class="network-center-node">
+                <div class="node-self">
+                    <span>{{ profile.name[0]|upper if profile else '?' }}</span>
+                </div>
+                <span class="node-label">Vous</span>
+            </div>
+            {% if contacts_list %}
+            {% for c in contacts_list %}
+            <div class="network-peer-node" style="--angle: {{ loop.index0 * (360 / contacts_list|length) }}deg; --distance: {{ 120 + (loop.index0 % 3) * 30 }}px;">
+                <div class="node-peer {{ 'node-recent' if c.fingerprint in recent_fps }}">
+                    <span>{{ c.name[0]|upper }}</span>
+                </div>
+                <span class="node-label">{{ c.name }}</span>
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Network Config -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>⚙️ Configuration réseau</h2>
+    </div>
+    <div class="panel-body">
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Port mesh (TCP)</span>
+                <span class="config-value">4242</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Port découverte (UDP)</span>
+                <span class="config-value">4243</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Interface WiFi</span>
+                <span class="config-value">wlan0</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">SSID mesh</span>
+                <span class="config-value">MeshBox</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">IP réseau mesh</span>
+                <span class="config-value">10.42.0.0/16</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Bluetooth LE</span>
+                <span class="config-value">Activé</span>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

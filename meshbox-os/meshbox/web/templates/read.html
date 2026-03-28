@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <a href="/inbox" class="btn btn-ghost">← Retour</a>
+    </div>
+</div>
+
+<div class="message-detail">
+    <div class="message-detail-header">
+        <div class="message-detail-avatar">{{ sender_name[0]|upper }}</div>
+        <div class="message-detail-meta">
+            <h2>{{ sender_name }}</h2>
+            <span class="meta-fp" title="{{ sender_fingerprint }}">🔑 {{ sender_fingerprint }}</span>
+            <span class="meta-time">📅 {{ msg_time }}</span>
+            <span class="meta-id">🆔 {{ message_id[:16] }}…</span>
+        </div>
+    </div>
+
+    <div class="message-detail-body">
+        {% if plaintext %}
+        <div class="message-text">{{ plaintext }}</div>
+        {% else %}
+        <div class="alert alert-error">
+            <span class="alert-icon">⚠️</span>
+            <span>Impossible de déchiffrer ce message. La clé de chiffrement ne correspond plus.</span>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="message-detail-footer">
+        <div class="message-crypto-info">
+            <span class="crypto-badge">🔐 Chiffré E2E</span>
+            <span class="crypto-badge">✓ Signature vérifiée</span>
+            <span class="crypto-badge">Curve25519 × XSalsa20-Poly1305</span>
+        </div>
+        <div class="message-actions">
+            <a href="/send?to={{ sender_fingerprint }}" class="btn btn-primary">↩ Répondre</a>
+            <form method="POST" action="/delete-message/{{ message_id }}" style="display:inline">
+                <button type="submit" class="btn btn-danger" onclick="return confirm('Supprimer ce message ?')">🗑 Supprimer</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

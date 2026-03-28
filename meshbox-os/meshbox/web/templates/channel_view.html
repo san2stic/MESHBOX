@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <a href="/channels" class="btn btn-ghost btn-sm">← Canaux</a>
+        <h2># {{ channel.name }}</h2>
+    </div>
+    <div class="page-header-right">
+        {% if profile and channel.creator_fingerprint == profile.fingerprint %}
+        <form method="POST" action="/channels/{{ channel.channel_id }}/delete" style="display:inline">
+            <button type="submit" class="btn btn-danger-ghost btn-sm" onclick="return confirm('Supprimer le canal {{ channel.name }} et tous ses messages ?')">🗑 Supprimer</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+{% if channel.description %}
+<div class="channel-description-bar">
+    <span>📋</span> {{ channel.description }}
+</div>
+{% endif %}
+
+<!-- Post Form -->
+<div class="panel channel-compose">
+    <form method="POST" action="/channels/{{ channel.channel_id }}/post" class="channel-post-form">
+        <div class="channel-input-row">
+            <textarea name="content" class="channel-input" placeholder="Écrire un message dans #{{ channel.name }}..." rows="2" required></textarea>
+            <button type="submit" class="btn btn-primary channel-send-btn">📤 Poster</button>
+        </div>
+    </form>
+</div>
+
+<!-- Messages -->
+<div class="channel-messages">
+    {% if messages %}
+        {% for msg in messages|reverse %}
+        <div class="channel-msg">
+            <div class="channel-msg-avatar">{{ (msg.sender_name or '?')[0]|upper }}</div>
+            <div class="channel-msg-content">
+                <div class="channel-msg-header">
+                    <strong class="channel-msg-sender">{{ msg.sender_name or msg.sender_fingerprint[:12] }}</strong>
+                    <span class="channel-msg-time">{{ msg.time_ago }}</span>
+                </div>
+                <p class="channel-msg-text">{{ msg.content }}</p>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">💬</span>
+            <p>Aucun message dans ce canal</p>
+            <span class="empty-hint">Soyez le premier à poster !</span>
+        </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-scroll to bottom
+const msgs = document.querySelector('.channel-messages');
+if (msgs && msgs.scrollHeight > msgs.clientHeight) {
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+// Auto-refresh every 10s
+setInterval(() => {
+    window.location.reload();
+}, 30000);
+
+// Submit on Ctrl+Enter
+document.querySelector('.channel-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.target.closest('form').submit();
+    }
+});
+</script>
+{% endblock %}

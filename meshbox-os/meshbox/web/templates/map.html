@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>🗺️ Carte du réseau</h2>
+        <span class="page-count">{{ locations|length }} position{{ 's' if locations|length != 1 }}</span>
+    </div>
+    <div class="page-header-right">
+        <button class="btn btn-primary" onclick="document.getElementById('shareLocationModal').classList.add('open')">
+            📍 Partager ma position
+        </button>
+        <button class="btn btn-ghost" onclick="getUserLocation()">
+            🎯 Ma position GPS
+        </button>
+    </div>
+</div>
+
+<!-- Share Location Modal -->
+<div class="modal" id="shareLocationModal">
+    <div class="modal-overlay" onclick="this.parentElement.classList.remove('open')"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>📍 Partager ma position</h3>
+            <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
+        </div>
+        <form method="POST" action="/map/share">
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Latitude</label>
+                        <input type="number" step="any" name="latitude" id="inputLat" class="form-input" placeholder="48.8566" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Longitude</label>
+                        <input type="number" step="any" name="longitude" id="inputLng" class="form-input" placeholder="2.3522" required>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Label (optionnel)</label>
+                    <input type="text" name="label" class="form-input" placeholder="Ex: Base camp, Point de rencontre...">
+                </div>
+                <button type="button" class="btn btn-ghost btn-full" onclick="autoFillGPS()" style="margin-top: 8px;">
+                    🎯 Utiliser mon GPS
+                </button>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" onclick="this.closest('.modal').classList.remove('open')">Annuler</button>
+                <button type="submit" class="btn btn-primary">📍 Partager</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Map Container -->
+<div class="panel">
+    <div class="panel-body" style="padding: 0;">
+        <div id="meshMap" class="map-container"></div>
+    </div>
+</div>
+
+<!-- Locations List -->
+<div class="panel" style="margin-top: 20px;">
+    <div class="panel-header">
+        <h2>📍 Positions partagées</h2>
+    </div>
+    <div class="panel-body">
+        {% if locations %}
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Nœud</th>
+                        <th>Position</th>
+                        <th>Label</th>
+                        <th>Quand</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for loc in locations %}
+                    <tr class="location-row" onclick="panTo({{ loc.latitude }}, {{ loc.longitude }})">
+                        <td>
+                            <div class="table-cell-primary">
+                                <span class="peer-indicator wifi"></span>
+                                {{ loc.peer_name or loc.fingerprint[:12] }}
+                            </div>
+                        </td>
+                        <td>
+                            <code>{{ "%.4f"|format(loc.latitude) }}, {{ "%.4f"|format(loc.longitude) }}</code>
+                        </td>
+                        <td>{{ loc.label or '—' }}</td>
+                        <td>{{ loc.time_ago }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">🗺️</span>
+            <p>Aucune position partagée pour le moment</p>
+            <span class="empty-hint">Partagez votre position pour que les autres nœuds puissent vous localiser sur la carte.</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- My Location History -->
+{% if my_locations %}
+<div class="panel" style="margin-top: 20px;">
+    <div class="panel-header">
+        <h2>📌 Mes positions</h2>
+    </div>
+    <div class="panel-body">
+        <div class="location-history">
+            {% for loc in my_locations[:10] %}
+            <div class="location-entry">
+                <span class="location-coords">{{ "%.4f"|format(loc.latitude) }}, {{ "%.4f"|format(loc.longitude) }}</span>
+                {% if loc.label %}<span class="location-label">{{ loc.label }}</span>{% endif %}
+                <span class="location-time">{{ _time_ago(loc.timestamp) if _time_ago is defined else '' }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<!-- Leaflet CSS & JS (offline-compatible CDN) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+<script>
+// Initialize map
+const map = L.map('meshMap').setView([48.8566, 2.3522], 5);
+
+// Tile layer - OpenStreetMap
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 19,
+}).addTo(map);
+
+// Custom icons
+const meshIcon = L.divIcon({
+    className: 'mesh-marker',
+    html: '<div class="mesh-marker-dot"></div>',
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+});
+
+const myIcon = L.divIcon({
+    className: 'mesh-marker mesh-marker-self',
+    html: '<div class="mesh-marker-dot self"></div>',
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+});
+
+// Add markers for shared locations
+const locations = {{ locations|tojson }};
+const bounds = [];
+
+locations.forEach(loc => {
+    const marker = L.marker([loc.latitude, loc.longitude], { icon: meshIcon }).addTo(map);
+    const name = loc.peer_name || loc.fingerprint.substring(0, 12);
+    const label = loc.label ? `<br><em>${loc.label}</em>` : '';
+    marker.bindPopup(`<strong>📡 ${name}</strong>${label}<br><small>${loc.time_ago}</small>`);
+    bounds.push([loc.latitude, loc.longitude]);
+});
+
+if (bounds.length > 0) {
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 13 });
+}
+
+function panTo(lat, lng) {
+    map.setView([lat, lng], 14);
+}
+
+function getUserLocation() {
+    if (!navigator.geolocation) {
+        showToast('Géolocalisation non supportée', 'error');
+        return;
+    }
+    navigator.geolocation.getCurrentPosition(
+        (pos) => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            map.setView([lat, lng], 15);
+            L.marker([lat, lng], { icon: myIcon }).addTo(map)
+                .bindPopup('<strong>📍 Ma position</strong>').openPopup();
+        },
+        () => showToast('Impossible d\'obtenir la position GPS', 'error')
+    );
+}
+
+function autoFillGPS() {
+    if (!navigator.geolocation) {
+        showToast('Géolocalisation non supportée', 'error');
+        return;
+    }
+    navigator.geolocation.getCurrentPosition(
+        (pos) => {
+            document.getElementById('inputLat').value = pos.coords.latitude.toFixed(6);
+            document.getElementById('inputLng').value = pos.coords.longitude.toFixed(6);
+            showToast('Position GPS obtenue !', 'success');
+        },
+        () => showToast('Impossible d\'obtenir la position GPS', 'error')
+    );
+}
+
+// Allow clicking on map to set coordinates in modal
+map.on('click', (e) => {
+    const modal = document.getElementById('shareLocationModal');
+    if (modal.classList.contains('open')) {
+        document.getElementById('inputLat').value = e.latlng.lat.toFixed(6);
+        document.getElementById('inputLng').value = e.latlng.lng.toFixed(6);
+    }
+});
+</script>
+{% endblock %}

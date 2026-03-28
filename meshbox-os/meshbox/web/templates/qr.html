@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>📱 QR Code</h2>
+    </div>
+</div>
+
+<div class="qr-page-layout">
+    <!-- QR Display -->
+    <div class="panel qr-panel">
+        <div class="panel-header">
+            <h2>🔗 Mon QR Code de contact</h2>
+        </div>
+        <div class="panel-body" style="text-align: center;">
+            <p style="margin-bottom: 20px; color: var(--text-secondary); font-size: 13px;">
+                Scannez ce QR code pour ajouter votre profil MeshBox comme contact.
+            </p>
+            <div class="qr-image-container">
+                <img src="/qr/generate" alt="QR Code MeshBox" class="qr-image" id="qrImage"
+                     onerror="this.style.display='none'; document.getElementById('qrFallback').style.display='block';">
+                <div id="qrFallback" style="display:none;" class="qr-fallback">
+                    <span class="empty-icon">📱</span>
+                    <p>QR code non disponible</p>
+                    <span class="empty-hint">Le module qrcode n'est pas installé.</span>
+                </div>
+            </div>
+            {% if profile %}
+            <div class="qr-identity">
+                <div class="profile-avatar" style="margin: 16px auto 8px; width: 48px; height: 48px; font-size: 20px;">
+                    {{ profile.name[0]|upper }}
+                </div>
+                <h3>{{ profile.name }}</h3>
+                <span class="qr-fingerprint">🔑 {{ profile.fingerprint }}</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Profile JSON -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>📋 Données du profil (JSON)</h2>
+        </div>
+        <div class="panel-body">
+            <p style="margin-bottom: 12px; color: var(--text-secondary); font-size: 13px;">
+                Partagez ces données pour qu'un autre nœud puisse vous ajouter manuellement en contact.
+            </p>
+            <div class="code-block">
+                <pre id="profileJson">{{ public_json }}</pre>
+                <button class="btn btn-ghost btn-sm copy-btn" onclick="copyJSON()">📋 Copier</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scan Section -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>📷 Ajouter un contact</h2>
+        </div>
+        <div class="panel-body">
+            <p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 13px;">
+                Collez le JSON d'un contact pour l'ajouter à votre liste de contacts.
+            </p>
+            <form method="POST" action="/add-contact">
+                <div class="form-group">
+                    <label class="form-label">JSON du contact</label>
+                    <textarea name="json_data" class="form-textarea" rows="6" placeholder='{"fingerprint": "...", "name": "...", "verify_key": "...", "box_public_key": "..."}'></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">👤 Ajouter le contact</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyJSON() {
+    const text = document.getElementById('profileJson').textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('JSON copié !', 'success');
+    }).catch(() => {
+        // Fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('JSON copié !', 'success');
+    });
+}
+</script>
+{% endblock %}

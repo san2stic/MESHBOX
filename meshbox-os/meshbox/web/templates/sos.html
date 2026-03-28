@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>🚨 Alertes SOS</h2>
+        {% if active_alerts %}
+        <span class="page-count sos-active-badge">{{ active_alerts|length }} alerte{{ 's' if active_alerts|length != 1 }} active{{ 's' if active_alerts|length != 1 }}</span>
+        {% endif %}
+    </div>
+    <div class="page-header-right">
+        <button class="btn btn-sos" onclick="document.getElementById('sosModal').classList.add('open')">
+            🚨 Envoyer un SOS
+        </button>
+    </div>
+</div>
+
+<!-- SOS Send Modal -->
+<div class="modal" id="sosModal">
+    <div class="modal-overlay" onclick="this.parentElement.classList.remove('open')"></div>
+    <div class="modal-content sos-modal">
+        <div class="modal-header">
+            <h3>🚨 Diffuser une alerte SOS</h3>
+            <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
+        </div>
+        <form method="POST" action="/sos/send">
+            <div class="modal-body">
+                <div class="sos-warning">
+                    <span class="sos-warning-icon">⚠️</span>
+                    <p>Cette alerte sera diffusée à <strong>tous les nœuds</strong> du réseau mesh à proximité. Utilisez uniquement en cas d'urgence réelle.</p>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Message d'urgence</label>
+                    <textarea name="message" class="form-textarea" rows="3" placeholder="Décrivez votre situation d'urgence..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Niveau de gravité</label>
+                    <div class="severity-options">
+                        <label class="severity-option">
+                            <input type="radio" name="severity" value="low">
+                            <span class="severity-card severity-low">
+                                <span class="severity-icon">🟡</span>
+                                <span class="severity-text">Attention</span>
+                            </span>
+                        </label>
+                        <label class="severity-option">
+                            <input type="radio" name="severity" value="high" checked>
+                            <span class="severity-card severity-high">
+                                <span class="severity-icon">🟠</span>
+                                <span class="severity-text">Urgent</span>
+                            </span>
+                        </label>
+                        <label class="severity-option">
+                            <input type="radio" name="severity" value="critical">
+                            <span class="severity-card severity-critical">
+                                <span class="severity-icon">🔴</span>
+                                <span class="severity-text">Critique</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Latitude (optionnel)</label>
+                        <input type="number" step="any" name="latitude" id="sosLat" class="form-input" placeholder="48.8566">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Longitude (optionnel)</label>
+                        <input type="number" step="any" name="longitude" id="sosLng" class="form-input" placeholder="2.3522">
+                    </div>
+                </div>
+                <button type="button" class="btn btn-ghost btn-full" onclick="fillSOSLocation()">
+                    🎯 Ajouter ma position GPS
+                </button>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" onclick="this.closest('.modal').classList.remove('open')">Annuler</button>
+                <button type="submit" class="btn btn-sos">🚨 DIFFUSER L'ALERTE</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Active Alerts -->
+{% if active_alerts %}
+<div class="sos-alerts-active">
+    {% for alert in active_alerts %}
+    <div class="sos-alert-card severity-{{ alert.severity }}">
+        <div class="sos-alert-header">
+            <div class="sos-alert-severity">
+                {% if alert.severity == 'critical' %}🔴 CRITIQUE
+                {% elif alert.severity == 'high' %}🟠 URGENT
+                {% else %}🟡 ATTENTION{% endif %}
+            </div>
+            <span class="sos-alert-time">{{ alert.time_ago }}</span>
+        </div>
+        <div class="sos-alert-body">
+            <div class="sos-alert-sender">
+                <strong>{{ alert.sender_name or alert.sender_fingerprint[:12] }}</strong>
+            </div>
+            <p class="sos-alert-message">{{ alert.message }}</p>
+            {% if alert.latitude and alert.longitude %}
+            <div class="sos-alert-location">
+                📍 Position: <code>{{ "%.4f"|format(alert.latitude) }}, {{ "%.4f"|format(alert.longitude) }}</code>
+                <a href="/map" class="sos-map-link">Voir sur la carte →</a>
+            </div>
+            {% endif %}
+        </div>
+        <div class="sos-alert-footer">
+            {% if profile and alert.sender_fingerprint == profile.fingerprint %}
+            <form method="POST" action="/sos/deactivate/{{ alert.alert_id }}">
+                <button type="submit" class="btn btn-ghost btn-sm">✓ Désactiver l'alerte</button>
+            </form>
+            {% endif %}
+            <a href="/send?to={{ alert.sender_fingerprint }}" class="btn btn-primary btn-sm">✉ Répondre</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="panel">
+    <div class="panel-body">
+        <div class="empty-state">
+            <span class="empty-icon">✅</span>
+            <h3>Aucune alerte active</h3>
+            <p>Tout va bien ! Aucune alerte SOS n'est actuellement diffusée sur le réseau mesh.</p>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- History -->
+{% if all_alerts %}
+<div class="panel" style="margin-top: 24px;">
+    <div class="panel-header">
+        <h2>📋 Historique des alertes</h2>
+    </div>
+    <div class="panel-body">
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Gravité</th>
+                        <th>Émetteur</th>
+                        <th>Message</th>
+                        <th>Statut</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for alert in all_alerts %}
+                    <tr>
+                        <td>
+                            {% if alert.severity == 'critical' %}<span class="badge badge-danger">CRITIQUE</span>
+                            {% elif alert.severity == 'high' %}<span class="badge badge-warning">URGENT</span>
+                            {% else %}<span class="badge badge-info">ATTENTION</span>{% endif %}
+                        </td>
+                        <td>{{ alert.sender_name or alert.sender_fingerprint[:12] }}</td>
+                        <td>{{ alert.message[:60] }}{{ '...' if alert.message|length > 60 }}</td>
+                        <td>
+                            {% if alert.active %}<span class="badge badge-danger">ACTIF</span>
+                            {% else %}<span class="badge badge-success">Résolu</span>{% endif %}
+                        </td>
+                        <td>{{ alert.time_ago }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Info Panel -->
+<div class="panel info-panel" style="margin-top: 24px;">
+    <div class="panel-header">
+        <h2>🚨 Système d'urgence mesh</h2>
+    </div>
+    <div class="panel-body">
+        <div class="features-grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="feature">
+                <span class="feature-icon">📡</span>
+                <h3>Diffusion réseau</h3>
+                <p>L'alerte est propagée automatiquement à tous les nœuds mesh à portée</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">📍</span>
+                <h3>Géolocalisation</h3>
+                <p>Partagez votre position GPS pour être localisé rapidement</p>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">⏰</span>
+                <h3>Expiration 24h</h3>
+                <p>Les alertes expirent automatiquement après 24 heures</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fillSOSLocation() {
+    if (!navigator.geolocation) {
+        showToast('Géolocalisation non supportée', 'error');
+        return;
+    }
+    navigator.geolocation.getCurrentPosition(
+        (pos) => {
+            document.getElementById('sosLat').value = pos.coords.latitude.toFixed(6);
+            document.getElementById('sosLng').value = pos.coords.longitude.toFixed(6);
+            showToast('Position GPS ajoutée', 'success');
+        },
+        () => showToast('Impossible d\'obtenir la position', 'error')
+    );
+}
+
+// Auto-refresh SOS alerts
+setInterval(async () => {
+    try {
+        const resp = await fetch('/api/sos');
+        const data = await resp.json();
+        const count = data.length;
+        // Update badge if count changed
+        const badge = document.querySelector('.sos-active-badge');
+        if (badge) {
+            badge.textContent = `${count} alerte${count !== 1 ? 's' : ''} active${count !== 1 ? 's' : ''}`;
+        }
+    } catch(e) {}
+}, 15000);
+</script>
+{% endblock %}

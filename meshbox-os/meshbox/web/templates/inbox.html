@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>📥 Boîte de réception</h2>
+        <span class="page-count">{{ messages|length }} message{{ 's' if messages|length != 1 }}</span>
+    </div>
+    <div class="page-header-right">
+        <div class="search-box">
+            <input type="text" id="searchMessages" placeholder="Rechercher..." class="search-input" autocomplete="off">
+            <span class="search-icon">🔍</span>
+        </div>
+        <div class="filter-group">
+            <button class="filter-btn active" data-filter="all">Tous</button>
+            <button class="filter-btn" data-filter="unread">Non lus</button>
+        </div>
+    </div>
+</div>
+
+<div class="message-list" id="messageList">
+    {% if messages %}
+        {% for msg in messages %}
+        <div class="message-row {{ 'unread' if not msg.read }}" data-read="{{ msg.read }}">
+            <a href="/read/{{ msg.message_id }}" class="message-row-link">
+                <div class="message-avatar {{ 'avatar-unread' if not msg.read }}">
+                    {{ msg.sender_name[0]|upper }}
+                </div>
+                <div class="message-content">
+                    <div class="message-top">
+                        <span class="message-sender">{{ msg.sender_name }}</span>
+                        <span class="message-time">{{ msg.time }}</span>
+                    </div>
+                    <div class="message-bottom">
+                        <span class="message-id">🔐 #{{ msg.message_id[:8] }}…</span>
+                        {% if not msg.read %}
+                        <span class="badge badge-primary">Nouveau</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="message-actions-indicator">→</div>
+            </a>
+            <form method="POST" action="/delete-message/{{ msg.message_id }}" class="message-delete-form">
+                <button type="submit" class="btn-icon btn-danger-ghost" title="Supprimer" onclick="return confirm('Supprimer ce message ?')">🗑️</button>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-state">
+            <span class="empty-icon">📭</span>
+            <h3>Aucun message</h3>
+            <p>Votre boîte de réception est vide.<br>Les messages chiffrés des autres nœuds MeshBox apparaîtront ici.</p>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Search filter
+    document.getElementById('searchMessages')?.addEventListener('input', function(e) {
+        const query = e.target.value.toLowerCase();
+        document.querySelectorAll('.message-row').forEach(row => {
+            const text = row.textContent.toLowerCase();
+            row.style.display = text.includes(query) ? '' : 'none';
+        });
+    });
+
+    // Read/Unread filter
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            const filter = this.dataset.filter;
+            document.querySelectorAll('.message-row').forEach(row => {
+                if (filter === 'all') {
+                    row.style.display = '';
+                } else if (filter === 'unread') {
+                    row.style.display = row.dataset.read === '0' ? '' : 'none';
+                }
+            });
+        });
+    });
+</script>
+{% endblock %}

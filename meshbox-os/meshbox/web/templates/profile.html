@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+{% if profile %}
+<div class="profile-page">
+    <!-- Profile Card -->
+    <div class="profile-main-card">
+        <div class="profile-big-avatar">{{ profile.name[0]|upper }}</div>
+        <div class="profile-main-info">
+            <h2>{{ profile.name }}</h2>
+            <p class="profile-bio">{{ profile.bio or 'Aucune bio' }}</p>
+            <div class="profile-metas">
+                <span class="profile-meta-item">🔑 {{ profile.fingerprint }}</span>
+                <span class="profile-meta-item">📅 Créé le {{ created_str }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Profile -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>✏️ Modifier le profil</h2>
+        </div>
+        <div class="panel-body">
+            <form method="POST" action="/profile/update" class="form-inline">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Nom / Pseudo</label>
+                        <input type="text" name="name" class="form-input" value="{{ profile.name }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Bio</label>
+                        <input type="text" name="bio" class="form-input" value="{{ profile.bio or '' }}" placeholder="Courte description...">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Sauvegarder</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Crypto Keys -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>🔐 Clés cryptographiques</h2>
+        </div>
+        <div class="panel-body">
+            <div class="key-grid">
+                <div class="key-card">
+                    <div class="key-label">Clé de vérification (Ed25519)</div>
+                    <code class="key-value">{{ profile.verify_key }}</code>
+                </div>
+                <div class="key-card">
+                    <div class="key-label">Clé de chiffrement (Curve25519)</div>
+                    <code class="key-value">{{ profile.box_public_key }}</code>
+                </div>
+                <div class="key-card">
+                    <div class="key-label">Empreinte (Fingerprint)</div>
+                    <code class="key-value">{{ profile.fingerprint }}</code>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Share Profile -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>📤 Partager mon profil</h2>
+        </div>
+        <div class="panel-body">
+            <p class="form-hint" style="margin-bottom: 12px">
+                Partagez ce JSON avec d'autres utilisateurs pour qu'ils puissent vous ajouter en contact et vous envoyer des messages.
+            </p>
+            <div class="code-block">
+                <pre id="profileJson">{{ public_json }}</pre>
+                <button class="btn btn-ghost btn-sm copy-btn" onclick="copyToClipboard('profileJson')">📋 Copier</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% else %}
+<!-- Setup / Create Profile -->
+<div class="setup-container">
+    <div class="setup-card">
+        <div class="setup-icon">🔑</div>
+        <h2>Créer votre identité MeshBox</h2>
+        <p>Générez vos clés cryptographiques pour commencer à communiquer de manière sécurisée sur le réseau mesh.</p>
+
+        <form method="POST" action="/profile/create" class="setup-form">
+            <div class="form-group">
+                <label class="form-label">Nom / Pseudo *</label>
+                <input type="text" name="name" class="form-input" required
+                       placeholder="Comment vous voulez être identifié sur le réseau" autofocus>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Bio (optionnel)</label>
+                <input type="text" name="bio" class="form-input"
+                       placeholder="Courte description...">
+            </div>
+
+            <div class="setup-info">
+                <h4>Ce qui va être généré :</h4>
+                <ul>
+                    <li>🔑 Paire de clés Ed25519 (signature)</li>
+                    <li>🔐 Paire de clés Curve25519 (chiffrement)</li>
+                    <li>🆔 Empreinte unique (fingerprint)</li>
+                </ul>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-lg btn-full">
+                🔐 Générer mon identité
+            </button>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyToClipboard(elementId) {
+    const text = document.getElementById(elementId).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('Profil copié dans le presse-papier', 'success');
+    }).catch(() => {
+        // Fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('Profil copié', 'success');
+    });
+}
+</script>
+{% endblock %}
