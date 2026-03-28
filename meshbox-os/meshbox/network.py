@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import struct
+import sys
 import time
 from typing import Callable, Optional
 
@@ -286,6 +287,10 @@ class BluetoothDiscovery:
 
     async def start_advertising(self):
         """Start BLE advertising (Linux only, requires bluetoothctl)."""
+        if sys.platform == "darwin":
+            logger.info("BLE advertising disabled on macOS (no Bluetooth permission for daemon)")
+            return
+
         self._running = True
         adv_name = f"MB-{self.profile_data['fingerprint'][:8]}"
         logger.info("BLE: advertising as '%s'", adv_name)
@@ -308,6 +313,10 @@ class BluetoothDiscovery:
 
     async def start_scanner(self):
         """Scan for nearby BLE devices."""
+        if sys.platform == "darwin":
+            logger.info("BLE scanning disabled on macOS (TCC requires Bluetooth permission in Info.plist)")
+            return
+
         self._running = True
 
         try:
