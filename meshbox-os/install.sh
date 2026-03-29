@@ -129,7 +129,7 @@ info "Data directory : $MESHBOX_DATA_DIR"
 install_systemd_services() {
     info "Setting up systemd user services..."
 
-    local unit_dir="$HOME/.config/systemd/user"
+    local unit_dir="$REAL_HOME/.config/systemd/user"
     mkdir -p "$unit_dir"
 
     # ── meshbox-daemon.service ────────────────────────────────
@@ -170,11 +170,41 @@ WantedBy=default.target
 EOF
     ok "Created meshbox-web.service"
 
+    # ── Fix ownership if running under sudo ───────────────────
+    if [[ -n "${SUDO_UID:-}" ]]; then
+        chown -R "$REAL_USER" "$REAL_HOME/.config/systemd"
+    fi
+
     # ── Enable & start ────────────────────────────────────────
-    systemctl --user daemon-reload
-    systemctl --user enable meshbox-daemon.service meshbox-web.service
-    systemctl --user start  meshbox-daemon.service meshbox-web.service
+    # When running under sudo, systemctl --user needs the real user's
+    # D-Bus session bus. We use machinectl or fall back to sudo -u
+    # with XDG_RUNTIME_DIR set.
+    local run_as_user=""
+    if [[ -n "${SUDO_UID:-}" ]]; then
+        local xdg_runtime="/run/user/$REAL_UID"
+        if [[ -d "$xdg_runtime" ]]; then
+            run_as_user="sudo -u $REAL_USER XDG_RUNTIME_DIR=$xdg_runtime DBUS_SESSION_BUS_ADDRESS=unix:path=$xdg_runtime/bus"
+        elif command -v machinectl &>/dev/null; then
+            # machinectl approach — works even without XDG_RUNTIME_DIR
+            run_as_user="machinectl shell --uid=$REAL_USER .host /bin/bash -c"
+        fi
+    fi
+
+    if [[ -n "$run_as_user" ]] && [[ "$run_as_user" == machinectl* ]]; then
+        $run_as_user "systemctl --user daemon-reload && systemctl --user enable meshbox-daemon.service meshbox-web.service && systemctl --user start meshbox-daemon.service meshbox-web.service"
+    elif [[ -n "$run_as_user" ]]; then
+        $run_as_user systemctl --user daemon-reload
+        $run_as_user systemctl --user enable meshbox-daemon.service meshbox-web.service
+        $run_as_user systemctl --user start  meshbox-daemon.service meshbox-web.service
+    else
+        systemctl --user daemon-reload
+        systemctl --user enable meshbox-daemon.service meshbox-web.service
+        systemctl --user start  meshbox-daemon.service meshbox-web.service
+    fi
     ok "systemd services enabled and started"
+
+    # ── Enable lingering so user services start at boot ───────
+    loginctl enable-linger "$REAL_USER" 2>/dev/null || true
 
     echo ""
     info "Useful commands:"
