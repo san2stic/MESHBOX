@@ -36,6 +36,7 @@
             <div class="contact-actions">
                 <a href="/send?to={{ c.fingerprint }}" class="btn btn-primary btn-sm">✉ Message</a>
                 <form method="POST" action="/delete-contact/{{ c.fingerprint }}" style="display:inline">
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger-ghost btn-sm" onclick="return confirm('Supprimer {{ c.name }} ?')">🗑</button>
                 </form>
             </div>
@@ -63,6 +64,7 @@
             <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
         </div>
         <form method="POST" action="/add-contact">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
             <div class="modal-body">
                 <p class="form-hint" style="margin-bottom: 15px">
                     Collez le profil JSON exporté par un autre utilisateur MeshBox.

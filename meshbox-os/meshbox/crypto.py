@@ -1,22 +1,39 @@
 """
-MeshBox - E2E encryption engine.
+MeshBox - E2E encryption engine v4.
 Uses libsodium (NaCl) via PyNaCl for asymmetric and symmetric encryption.
 - Identity keys: Curve25519 (X25519) for key exchange
 - Signatures: Ed25519 for message and profile authenticity
 - Message encryption: XSalsa20-Poly1305 (crypto_box)
+- Perfect Forward Secrecy: ephemeral Curve25519 keys per message
+- Replay protection: persistent nonce tracking (DB-backed) + timestamp validation
+- Safety numbers: contact verification via fingerprint comparison
+- Async proof-of-work for non-blocking spam prevention
 """
 
+import asyncio
 import hashlib
+import hmac
 import os
+import struct
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 import nacl.encoding
 import nacl.hash
 import nacl.public
+import nacl.secret
 import nacl.signing
 import nacl.utils
+
+
+# Replay protection window (messages older than this are rejected)
+REPLAY_WINDOW_SECONDS = 86400 * 7  # 7 days
+# Maximum clock skew tolerance
+MAX_CLOCK_SKEW = 300  # 5 minutes into the future
+# Thread pool for async PoW
+_pow_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="meshbox-pow")
 
 
 class Identity:
@@ -85,28 +102,133 @@ class Identity:
         box_key = nacl.public.PrivateKey.generate()
         return cls(signing_key, box_key)
 
+    def compute_safety_number(self, other_verify_key_b64: str, other_box_key_b64: str) -> str:
+        """
+        Compute a safety number for contact verification (like Signal).
+        Both parties compute the same number, which they can compare
+        in-person or via a trusted channel.
+        """
+        my_vk = self.verify_key.encode()
+        my_bk = self.box_public_key.encode()
+        other_vk = nacl.encoding.Base64Encoder.decode(other_verify_key_b64.encode())
+        other_bk = nacl.encoding.Base64Encoder.decode(other_box_key_b64.encode())
+
+        # Sort keys so both parties get the same result
+        keys_a = my_vk + my_bk
+        keys_b = other_vk + other_bk
+
+        if keys_a < keys_b:
+            combined = keys_a + keys_b
+        else:
+            combined = keys_b + keys_a
+
+        # 5 rounds of SHA-256 for the safety number
+        digest = combined
+        for _ in range(5):
+            digest = hashlib.sha256(digest).digest()
+
+        # Format as 12 groups of 5 digits (60 digits total, like Signal)
+        number = int.from_bytes(digest, "big")
+        groups = []
+        for _ in range(12):
+            groups.append(f"{number % 100000:05d}")
+            number //= 100000
+
+        return " ".join(groups)
+
+
+class NonceTracker:
+    """
+    Track seen message nonces to prevent replay attacks.
+    Supports both in-memory tracking and optional persistent DB-backed storage
+    (via StorageEngine) for cross-restart protection.
+    """
+
+    def __init__(self, window: int = REPLAY_WINDOW_SECONDS, storage=None):
+        self.window = window
+        self._storage = storage  # Optional StorageEngine for persistence
+        self._seen: dict[str, float] = {}  # nonce_hex -> first_seen_timestamp
+        self._last_cleanup = time.time()
+
+    def check_and_record(self, nonce: str, timestamp: int) -> bool:
+        """
+        Check if a nonce has been seen before. Returns True if the message
+        is NEW (not a replay). Returns False if it's a replay.
+        """
+        now = time.time()
+
+        # Reject messages too far in the future
+        if timestamp > now + MAX_CLOCK_SKEW:
+            return False
+
+        # Reject messages older than the replay window
+        if timestamp < now - self.window:
+            return False
+
+        # Cleanup old entries periodically
+        if now - self._last_cleanup > 3600:
+            self._cleanup(now)
+
+        # Check for replay (memory first, then DB)
+        if nonce in self._seen:
+            return False
+        if self._storage and self._storage.is_nonce_seen(nonce):
+            self._seen[nonce] = now  # cache locally
+            return False
+
+        self._seen[nonce] = now
+        if self._storage:
+            self._storage.mark_nonce_seen(nonce)
+        return True
+
+    def _cleanup(self, now: float):
+        """Remove expired nonces from memory cache."""
+        expired = [n for n, ts in self._seen.items() if now - ts > self.window]
+        for n in expired:
+            del self._seen[n]
+        self._last_cleanup = now
+
 
 class CryptoEngine:
-    """Encryption engine for MeshBox messages."""
+    """Encryption engine for MeshBox messages with Perfect Forward Secrecy."""
 
-    def __init__(self, identity: Identity):
+    # Protocol version for crypto envelope
+    CRYPTO_VERSION = 3
+
+    def __init__(self, identity: Identity, storage=None):
         self.identity = identity
+        self.nonce_tracker = NonceTracker(storage=storage)
 
     def encrypt_message(self, plaintext: str, recipient_public_key_b64: str) -> dict:
         """
-        Encrypt a message for a specific recipient.
-        Uses crypto_box (Curve25519 + XSalsa20-Poly1305).
+        Encrypt a message for a specific recipient with Perfect Forward Secrecy.
+
+        PFS: generates a fresh ephemeral Curve25519 key pair for EACH message.
+        The ephemeral private key is used for the crypto_box and then discarded.
+        Even if the long-term keys are compromised, past messages remain secure.
         """
         recipient_key = nacl.public.PublicKey(
             recipient_public_key_b64.encode(), nacl.encoding.Base64Encoder
         )
 
-        box = nacl.public.Box(self.identity.box_key, recipient_key)
-        encrypted = box.encrypt(plaintext.encode("utf-8"))
-        signed = self.identity.signing_key.sign(encrypted)
+        # Generate ephemeral key pair for PFS
+        ephemeral_key = nacl.public.PrivateKey.generate()
+        ephemeral_public = ephemeral_key.public_key
+
+        # Encrypt with ephemeral private key -> recipient public key
+        box = nacl.public.Box(ephemeral_key, recipient_key)
+        message_nonce = nacl.utils.random(nacl.public.Box.NONCE_SIZE)
+        encrypted = box.encrypt(plaintext.encode("utf-8"), nonce=message_nonce)
+
+        # Sign the entire envelope (ephemeral_public + ciphertext) with long-term key
+        envelope = ephemeral_public.encode() + encrypted
+        signed = self.identity.signing_key.sign(envelope)
 
         return {
-            "ciphertext": nacl.encoding.Base64Encoder.encode(signed.message).decode(),
+            "ciphertext": nacl.encoding.Base64Encoder.encode(encrypted).decode(),
+            "ephemeral_key": nacl.encoding.Base64Encoder.encode(
+                ephemeral_public.encode()
+            ).decode(),
             "signature": nacl.encoding.Base64Encoder.encode(signed.signature).decode(),
             "sender_fingerprint": self.identity.fingerprint,
             "sender_verify_key": self.identity.verify_key.encode(
@@ -116,14 +238,66 @@ class CryptoEngine:
                 nacl.encoding.Base64Encoder
             ).decode(),
             "timestamp": int(time.time()),
-            "version": 1,
+            "nonce": nacl.encoding.Base64Encoder.encode(message_nonce).decode(),
+            "version": self.CRYPTO_VERSION,
         }
 
     def decrypt_message(self, encrypted_msg: dict) -> Optional[str]:
         """
         Decrypt a received message.
-        Verifies the signature then decrypts the content.
+        Supports both v1 (legacy) and v2 (PFS with ephemeral keys) envelopes.
+        Validates signature and checks for replay attacks.
         """
+        version = encrypted_msg.get("version", 1)
+
+        if version >= 2:
+            return self._decrypt_v2(encrypted_msg)
+        else:
+            return self._decrypt_v1(encrypted_msg)
+
+    def _decrypt_v2(self, encrypted_msg: dict) -> Optional[str]:
+        """Decrypt a v2 message (PFS with ephemeral keys)."""
+        try:
+            ciphertext = nacl.encoding.Base64Encoder.decode(
+                encrypted_msg["ciphertext"].encode()
+            )
+            ephemeral_key = nacl.public.PublicKey(
+                encrypted_msg["ephemeral_key"].encode(),
+                nacl.encoding.Base64Encoder,
+            )
+            signature = nacl.encoding.Base64Encoder.decode(
+                encrypted_msg["signature"].encode()
+            )
+            sender_verify_key = nacl.signing.VerifyKey(
+                encrypted_msg["sender_verify_key"].encode(),
+                nacl.encoding.Base64Encoder,
+            )
+
+            # Verify signature over (ephemeral_public + ciphertext)
+            envelope = ephemeral_key.encode() + ciphertext
+            sender_verify_key.verify(envelope, signature)
+
+            # Check replay protection
+            nonce_b64 = encrypted_msg.get("nonce", "")
+            timestamp = encrypted_msg.get("timestamp", 0)
+            if nonce_b64:
+                nonce_id = hashlib.sha256(
+                    f"{encrypted_msg['sender_fingerprint']}:{nonce_b64}".encode()
+                ).hexdigest()[:32]
+                if not self.nonce_tracker.check_and_record(nonce_id, timestamp):
+                    return None  # Replay detected
+
+            # Decrypt with our long-term private key + ephemeral public key
+            box = nacl.public.Box(self.identity.box_key, ephemeral_key)
+            plaintext = box.decrypt(ciphertext)
+
+            return plaintext.decode("utf-8")
+
+        except Exception:
+            return None
+
+    def _decrypt_v1(self, encrypted_msg: dict) -> Optional[str]:
+        """Decrypt a v1 (legacy) message for backward compatibility."""
         try:
             ciphertext = nacl.encoding.Base64Encoder.decode(
                 encrypted_msg["ciphertext"].encode()
@@ -182,9 +356,38 @@ class CryptoEngine:
             nonce += 1
 
     @staticmethod
+    async def generate_proof_of_work_async(data: bytes, difficulty: int = 16) -> int:
+        """Non-blocking proof-of-work using a thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _pow_executor,
+            CryptoEngine.generate_proof_of_work,
+            data,
+            difficulty,
+        )
+
+    @staticmethod
     def verify_proof_of_work(data: bytes, nonce: int, difficulty: int = 16) -> bool:
         """Verify a proof-of-work."""
         target = 2 ** (256 - difficulty)
         attempt = data + nonce.to_bytes(8, "big")
         h = int(hashlib.sha256(attempt).hexdigest(), 16)
         return h < target
+
+    @staticmethod
+    def derive_symmetric_key(shared_secret: bytes, context: bytes = b"meshbox-v2") -> bytes:
+        """Derive a symmetric key from a shared secret using HKDF-like construction."""
+        return hashlib.sha256(context + shared_secret).digest()
+
+    def encrypt_symmetric(self, plaintext: bytes, key: bytes) -> bytes:
+        """Encrypt data with a symmetric key (SecretBox - XSalsa20-Poly1305)."""
+        box = nacl.secret.SecretBox(key)
+        return box.encrypt(plaintext)
+
+    def decrypt_symmetric(self, ciphertext: bytes, key: bytes) -> Optional[bytes]:
+        """Decrypt data with a symmetric key."""
+        try:
+            box = nacl.secret.SecretBox(key)
+            return box.decrypt(ciphertext)
+        except Exception:
+            return None

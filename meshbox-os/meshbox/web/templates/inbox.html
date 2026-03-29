@@ -3,7 +3,7 @@
 <div class="page-header">
     <div class="page-header-left">
         <h2>📥 Boîte de réception</h2>
-        <span class="page-count">{{ messages|length }} message{{ 's' if messages|length != 1 }}</span>
+        <span class="page-count">{{ total }} message{{ 's' if total != 1 }}</span>
     </div>
     <div class="page-header-right">
         <div class="search-box">
@@ -40,6 +40,7 @@
                 <div class="message-actions-indicator">→</div>
             </a>
             <form method="POST" action="/delete-message/{{ msg.message_id }}" class="message-delete-form">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-icon btn-danger-ghost" title="Supprimer" onclick="return confirm('Supprimer ce message ?')">🗑️</button>
             </form>
         </div>
@@ -52,6 +53,18 @@
         </div>
     {% endif %}
 </div>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/inbox?page={{ page - 1 }}" class="btn btn-ghost btn-sm">← Précédent</a>
+    {% endif %}
+    <span class="pagination-info">Page {{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/inbox?page={{ page + 1 }}" class="btn btn-ghost btn-sm">Suivant →</a>
+    {% endif %}
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

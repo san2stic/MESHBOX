@@ -23,6 +23,7 @@
             <button class="modal-close" onclick="this.closest('.modal').classList.remove('open')">✕</button>
         </div>
         <form method="POST" action="/sos/send">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
             <div class="modal-body">
                 <div class="sos-warning">
                     <span class="sos-warning-icon">⚠️</span>
@@ -108,6 +109,7 @@
         <div class="sos-alert-footer">
             {% if profile and alert.sender_fingerprint == profile.fingerprint %}
             <form method="POST" action="/sos/deactivate/{{ alert.alert_id }}">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-ghost btn-sm">✓ Désactiver l'alerte</button>
             </form>
             {% endif %}

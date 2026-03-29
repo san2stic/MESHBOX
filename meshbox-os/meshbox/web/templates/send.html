@@ -17,6 +17,7 @@
 {% else %}
 <div class="compose-container">
     <form method="POST" action="/send" class="compose-form" id="composeForm">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <div class="form-group">
             <label class="form-label">Destinataire</label>
             <div class="select-wrapper">

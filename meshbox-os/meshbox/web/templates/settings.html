@@ -119,6 +119,7 @@
     <div class="panel-body">
         <div class="maintenance-actions">
             <form method="POST" action="/settings/cleanup" style="display:inline">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-primary" onclick="return confirm('Nettoyer les messages expirés ?')">
                     🧹 Nettoyer les messages expirés
                 </button>

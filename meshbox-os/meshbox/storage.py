@@ -1,11 +1,24 @@
 """
-MeshBox - Storage engine.
-SQLite database for messages, profiles, and metadata.
+MeshBox - Storage engine v4.
+SQLite database for messages, profiles, metadata, Tor peers, and settings.
+Features:
+- WAL mode + secure_delete for concurrent access and security
+- Connection pooling (thread-local reuse)
+- Disappearing messages (auto-delete after read + timer)
+- Message deduplication tracking (seen_messages table)
+- Persistent nonce tracking for replay protection (seen_nonces table)
+- Tor peer directory (tor_peers table)
+- Delivery receipts tracking
+- Key-value node settings (node_settings table)
+- Message pagination
 """
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,18 +26,29 @@ from typing import Optional
 
 
 class StorageEngine:
-    """Persistent storage management for messages and profiles."""
+    """Persistent storage management for messages, profiles, Tor peers, and settings."""
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        """Get a thread-local reusable connection."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.ProgrammingError:
+                pass
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA secure_delete=ON")
+        self._local.conn = conn
         return conn
 
     @contextmanager
@@ -36,8 +60,13 @@ class StorageEngine:
         except Exception:
             conn.rollback()
             raise
-        finally:
+
+    def close(self):
+        """Close the thread-local connection."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
             conn.close()
+            self._local.conn = None
 
     def _init_db(self):
         """Initialize the database schema."""
@@ -65,7 +94,10 @@ class StorageEngine:
                     delivered INTEGER DEFAULT 0,
                     read INTEGER DEFAULT 0,
                     proof_of_work INTEGER DEFAULT 0,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    disappear_after_read INTEGER DEFAULT 0,
+                    disappear_timer INTEGER DEFAULT 0,
+                    read_at INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS relay_messages (
@@ -146,10 +178,60 @@ class StorageEngine:
                     FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS seen_messages (
+                    message_id TEXT PRIMARY KEY,
+                    first_seen INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS trust_scores (
+                    fingerprint TEXT PRIMARY KEY,
+                    score REAL DEFAULT 0.5,
+                    successful_exchanges INTEGER DEFAULT 0,
+                    failed_exchanges INTEGER DEFAULT 0,
+                    last_updated INTEGER NOT NULL
+                );
+
+                -- v4: Persistent nonce tracking for replay protection
+                CREATE TABLE IF NOT EXISTS seen_nonces (
+                    nonce_id TEXT PRIMARY KEY,
+                    first_seen INTEGER NOT NULL
+                );
+
+                -- v4: Tor peer directory
+                CREATE TABLE IF NOT EXISTS tor_peers (
+                    fingerprint TEXT PRIMARY KEY,
+                    onion_address TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    verify_key TEXT DEFAULT '',
+                    box_public_key TEXT DEFAULT '',
+                    last_seen INTEGER NOT NULL,
+                    last_announced INTEGER DEFAULT 0,
+                    is_directory_node INTEGER DEFAULT 0,
+                    trust_score REAL DEFAULT 0.5
+                );
+
+                -- v4: Key-value node settings
+                CREATE TABLE IF NOT EXISTS node_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                -- v4: Delivery receipts
+                CREATE TABLE IF NOT EXISTS delivery_receipts (
+                    message_id TEXT PRIMARY KEY,
+                    recipient_fingerprint TEXT NOT NULL,
+                    delivered_at INTEGER NOT NULL,
+                    ack_received INTEGER DEFAULT 0
+                );
+
+                -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_messages_recipient
                     ON messages(recipient_fingerprint);
                 CREATE INDEX IF NOT EXISTS idx_messages_delivered
                     ON messages(delivered);
+                CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+                    ON messages(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_relay_recipient
                     ON relay_messages(recipient_fingerprint);
                 CREATE INDEX IF NOT EXISTS idx_relay_ttl
@@ -166,7 +248,45 @@ class StorageEngine:
                     ON sos_alerts(active, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_channel_messages_channel
                     ON channel_messages(channel_id, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_seen_messages_time
+                    ON seen_messages(first_seen);
+                CREATE INDEX IF NOT EXISTS idx_seen_nonces_time
+                    ON seen_nonces(first_seen);
+                CREATE INDEX IF NOT EXISTS idx_tor_peers_onion
+                    ON tor_peers(onion_address);
+                CREATE INDEX IF NOT EXISTS idx_tor_peers_seen
+                    ON tor_peers(last_seen);
+                CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
+                    ON delivery_receipts(recipient_fingerprint);
             """)
+            # Migration: add delivery_status column if upgrading from v3
+            try:
+                conn.execute("SELECT delivery_status FROM messages LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE messages ADD COLUMN delivery_status TEXT DEFAULT 'queued'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_delivery_status ON messages(delivery_status)")
+
+    # === Node Settings ===
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT value FROM node_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT INTO node_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """, (key, value, int(time.time())))
+
+    def get_all_settings(self) -> dict:
+        conn = self._get_conn()
+        rows = conn.execute("SELECT key, value FROM node_settings").fetchall()
+        return {r["key"]: r["value"] for r in rows}
 
     # === Profiles ===
 
@@ -193,43 +313,37 @@ class StorageEngine:
             ))
 
     def get_profile(self, fingerprint: str) -> Optional[dict]:
-        """Get a profile by fingerprint."""
         conn = self._get_conn()
         row = conn.execute(
             "SELECT * FROM profiles WHERE fingerprint = ?", (fingerprint,)
         ).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     def get_local_profile(self) -> Optional[dict]:
-        """Get the local profile."""
         conn = self._get_conn()
         row = conn.execute(
             "SELECT * FROM profiles WHERE is_local = 1"
         ).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     def get_all_profiles(self) -> list:
-        """Get all known profiles."""
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT * FROM profiles ORDER BY last_seen DESC"
         ).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     # === Messages ===
 
     def save_message(self, message: dict):
-        """Save a message (received or sent)."""
         with self._transaction() as conn:
             conn.execute("""
                 INSERT OR IGNORE INTO messages
                 (message_id, sender_fingerprint, recipient_fingerprint,
                  encrypted_payload, timestamp, ttl, hop_count, delivered,
-                 read, proof_of_work, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 read, proof_of_work, created_at,
+                 disappear_after_read, disappear_timer, delivery_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 message["message_id"],
                 message["sender_fingerprint"],
@@ -242,43 +356,98 @@ class StorageEngine:
                 message.get("read", 0),
                 message.get("proof_of_work", 0),
                 int(time.time()),
+                message.get("disappear_after_read", 0),
+                message.get("disappear_timer", 0),
+                message.get("delivery_status", "queued"),
             ))
 
-    def get_inbox(self, fingerprint: str) -> list:
-        """Get received messages for a user."""
+    def get_inbox(self, fingerprint: str, limit: int = 0, offset: int = 0) -> list:
         conn = self._get_conn()
-        rows = conn.execute("""
-            SELECT * FROM messages
-            WHERE recipient_fingerprint = ? AND delivered = 1
-            ORDER BY timestamp DESC
-        """, (fingerprint,)).fetchall()
-        conn.close()
+        if limit > 0:
+            rows = conn.execute("""
+                SELECT * FROM messages
+                WHERE recipient_fingerprint = ? AND delivered = 1
+                ORDER BY timestamp DESC LIMIT ? OFFSET ?
+            """, (fingerprint, limit, offset)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM messages
+                WHERE recipient_fingerprint = ? AND delivered = 1
+                ORDER BY timestamp DESC
+            """, (fingerprint,)).fetchall()
         return [dict(r) for r in rows]
 
-    def get_outbox(self, fingerprint: str) -> list:
-        """Get sent messages."""
+    def get_inbox_count(self, fingerprint: str) -> int:
         conn = self._get_conn()
-        rows = conn.execute("""
-            SELECT * FROM messages
-            WHERE sender_fingerprint = ?
-            ORDER BY timestamp DESC
-        """, (fingerprint,)).fetchall()
-        conn.close()
+        return conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE recipient_fingerprint = ? AND delivered = 1",
+            (fingerprint,)
+        ).fetchone()[0]
+
+    def get_outbox(self, fingerprint: str, limit: int = 0, offset: int = 0) -> list:
+        conn = self._get_conn()
+        if limit > 0:
+            rows = conn.execute("""
+                SELECT * FROM messages
+                WHERE sender_fingerprint = ?
+                ORDER BY timestamp DESC LIMIT ? OFFSET ?
+            """, (fingerprint, limit, offset)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM messages
+                WHERE sender_fingerprint = ?
+                ORDER BY timestamp DESC
+            """, (fingerprint,)).fetchall()
         return [dict(r) for r in rows]
+
+    def get_outbox_count(self, fingerprint: str) -> int:
+        conn = self._get_conn()
+        return conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE sender_fingerprint = ?",
+            (fingerprint,)
+        ).fetchone()[0]
 
     def mark_delivered(self, message_id: str):
         with self._transaction() as conn:
             conn.execute(
-                "UPDATE messages SET delivered = 1 WHERE message_id = ?",
+                "UPDATE messages SET delivered = 1, delivery_status = 'delivered' WHERE message_id = ?",
                 (message_id,),
             )
 
     def mark_read(self, message_id: str):
         with self._transaction() as conn:
             conn.execute(
-                "UPDATE messages SET read = 1 WHERE message_id = ?",
+                "UPDATE messages SET read = 1, read_at = ?, delivery_status = 'read' WHERE message_id = ?",
+                (int(time.time()), message_id),
+            )
+
+    def update_delivery_status(self, message_id: str, status: str):
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE messages SET delivery_status = ? WHERE message_id = ?",
+                (status, message_id),
+            )
+
+    # === Delivery Receipts ===
+
+    def save_delivery_receipt(self, message_id: str, recipient_fingerprint: str):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO delivery_receipts
+                (message_id, recipient_fingerprint, delivered_at, ack_received)
+                VALUES (?, ?, ?, 1)
+            """, (message_id, recipient_fingerprint, int(time.time())))
+            conn.execute(
+                "UPDATE messages SET delivery_status = 'delivered' WHERE message_id = ?",
                 (message_id,),
             )
+
+    def get_delivery_receipt(self, message_id: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM delivery_receipts WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return dict(row) if row else None
 
     # === Relay messages (store-and-forward) ===
 
@@ -308,7 +477,6 @@ class StorageEngine:
             WHERE recipient_fingerprint = ?
             AND (timestamp + ttl) > ?
         """, (fingerprint, now)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_all_relay_messages(self) -> list:
@@ -318,7 +486,6 @@ class StorageEngine:
             SELECT * FROM relay_messages
             WHERE (timestamp + ttl) > ?
         """, (now,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def delete_relay_message(self, message_id: str):
@@ -329,7 +496,6 @@ class StorageEngine:
             )
 
     def cleanup_expired(self):
-        """Clean up expired messages."""
         now = int(time.time())
         with self._transaction() as conn:
             conn.execute(
@@ -341,6 +507,184 @@ class StorageEngine:
                 "DELETE FROM messages WHERE timestamp < ? AND read = 1",
                 (thirty_days_ago,),
             )
+            conn.execute("""
+                DELETE FROM messages
+                WHERE disappear_after_read = 1
+                AND read = 1
+                AND read_at > 0
+                AND (read_at + disappear_timer) < ?
+            """, (now,))
+            two_weeks_ago = now - (14 * 86400)
+            conn.execute(
+                "DELETE FROM seen_messages WHERE first_seen < ?",
+                (two_weeks_ago,),
+            )
+            conn.execute(
+                "DELETE FROM seen_nonces WHERE first_seen < ?",
+                (two_weeks_ago,),
+            )
+            seven_days_ago = now - (7 * 86400)
+            conn.execute(
+                "DELETE FROM tor_peers WHERE last_seen < ? AND is_directory_node = 0",
+                (seven_days_ago,),
+            )
+
+    # === Message deduplication ===
+
+    def is_message_seen(self, message_id: str) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM seen_messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_message_seen(self, message_id: str):
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_messages (message_id, first_seen) VALUES (?, ?)",
+                (message_id, int(time.time())),
+            )
+
+    # === Persistent nonce tracking ===
+
+    def is_nonce_seen(self, nonce_id: str) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM seen_nonces WHERE nonce_id = ?", (nonce_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_nonce_seen(self, nonce_id: str):
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_nonces (nonce_id, first_seen) VALUES (?, ?)",
+                (nonce_id, int(time.time())),
+            )
+
+    # === Trust scores ===
+
+    def update_trust_score(self, fingerprint: str, success: bool):
+        with self._transaction() as conn:
+            existing = conn.execute(
+                "SELECT * FROM trust_scores WHERE fingerprint = ?", (fingerprint,)
+            ).fetchone()
+
+            if existing:
+                if success:
+                    conn.execute("""
+                        UPDATE trust_scores
+                        SET score = MIN(1.0, score + 0.05),
+                            successful_exchanges = successful_exchanges + 1,
+                            last_updated = ?
+                        WHERE fingerprint = ?
+                    """, (int(time.time()), fingerprint))
+                else:
+                    conn.execute("""
+                        UPDATE trust_scores
+                        SET score = MAX(0.0, score - 0.1),
+                            failed_exchanges = failed_exchanges + 1,
+                            last_updated = ?
+                        WHERE fingerprint = ?
+                    """, (int(time.time()), fingerprint))
+            else:
+                score = 0.55 if success else 0.4
+                conn.execute("""
+                    INSERT INTO trust_scores
+                    (fingerprint, score, successful_exchanges, failed_exchanges, last_updated)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (fingerprint, score, 1 if success else 0, 0 if success else 1, int(time.time())))
+
+    def get_trust_score(self, fingerprint: str) -> float:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT score FROM trust_scores WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        return row["score"] if row else 0.5
+
+    # === Tor Peers ===
+
+    def save_tor_peer(self, peer: dict):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT INTO tor_peers
+                (fingerprint, onion_address, name, verify_key, box_public_key,
+                 last_seen, last_announced, is_directory_node, trust_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    onion_address=excluded.onion_address,
+                    name=excluded.name,
+                    verify_key=excluded.verify_key,
+                    box_public_key=excluded.box_public_key,
+                    last_seen=excluded.last_seen,
+                    last_announced=excluded.last_announced
+            """, (
+                peer["fingerprint"],
+                peer["onion_address"],
+                peer.get("name", ""),
+                peer.get("verify_key", ""),
+                peer.get("box_public_key", ""),
+                int(time.time()),
+                peer.get("last_announced", 0),
+                peer.get("is_directory_node", 0),
+                peer.get("trust_score", 0.5),
+            ))
+
+    def get_tor_peer(self, fingerprint: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM tor_peers WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_tor_peer_by_onion(self, onion_address: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM tor_peers WHERE onion_address = ?", (onion_address,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_tor_peers(self) -> list:
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT * FROM tor_peers ORDER BY last_seen DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_active_tor_peers(self, max_age: int = 3600) -> list:
+        conn = self._get_conn()
+        cutoff = int(time.time()) - max_age
+        rows = conn.execute("""
+            SELECT * FROM tor_peers WHERE last_seen > ? ORDER BY trust_score DESC
+        """, (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_directory_nodes(self) -> list:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM tor_peers WHERE is_directory_node = 1"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_announced_peers_count(self) -> int:
+        """Count peers that have announced to us (last_announced > 0)."""
+        conn = self._get_conn()
+        return conn.execute(
+            "SELECT COUNT(*) FROM tor_peers WHERE last_announced > 0"
+        ).fetchone()[0]
+
+    def get_announced_peers(self, max_age: int = 7200) -> list:
+        """Get peers that have announced to us recently."""
+        conn = self._get_conn()
+        cutoff = int(time.time()) - max_age
+        rows = conn.execute(
+            "SELECT * FROM tor_peers WHERE last_announced > ? ORDER BY last_announced DESC",
+            (cutoff,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_tor_peer(self, fingerprint: str):
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM tor_peers WHERE fingerprint = ?", (fingerprint,))
 
     # === Peer log ===
 
@@ -361,7 +705,6 @@ class StorageEngine:
             WHERE fingerprint = ?
             ORDER BY seen_at DESC LIMIT 100
         """, (fingerprint,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def delete_message(self, message_id: str):
@@ -384,7 +727,6 @@ class StorageEngine:
             AND (p.name LIKE ? OR m.message_id LIKE ? OR m.sender_fingerprint LIKE ?)
             ORDER BY m.timestamp DESC
         """, (fingerprint, f"%{query}%", f"%{query}%", f"%{query}%")).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_recent_peers(self, limit: int = 20) -> list:
@@ -396,7 +738,6 @@ class StorageEngine:
             ORDER BY pl.seen_at DESC
             LIMIT ?
         """, (limit,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_message_by_id(self, message_id: str) -> Optional[dict]:
@@ -404,11 +745,9 @@ class StorageEngine:
         row = conn.execute(
             "SELECT * FROM messages WHERE message_id = ?", (message_id,)
         ).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     def get_stats(self) -> dict:
-        """Node statistics."""
         conn = self._get_conn()
         now = int(time.time())
         today_start = now - (now % 86400)
@@ -441,8 +780,20 @@ class StorageEngine:
             "active_sos": conn.execute("SELECT COUNT(*) FROM sos_alerts WHERE active = 1").fetchone()[0],
             "total_channels": conn.execute("SELECT COUNT(*) FROM channels").fetchone()[0],
             "total_locations": conn.execute("SELECT COUNT(*) FROM locations WHERE shared = 1").fetchone()[0],
+            "tor_peers": conn.execute("SELECT COUNT(*) FROM tor_peers").fetchone()[0],
+            "active_tor_peers": conn.execute(
+                "SELECT COUNT(*) FROM tor_peers WHERE last_seen > ?",
+                (now - 3600,)
+            ).fetchone()[0],
+            "tor_enabled": self.get_setting("tor_enabled", "true") == "true",
+            "directory_node_enabled": self.get_setting("directory_node_enabled", "false") == "true",
+            "directory_nodes": conn.execute(
+                "SELECT COUNT(*) FROM tor_peers WHERE is_directory_node = 1"
+            ).fetchone()[0],
+            "announced_peers": conn.execute(
+                "SELECT COUNT(*) FROM tor_peers WHERE last_announced > 0"
+            ).fetchone()[0],
         }
-        conn.close()
         return stats
 
     # === Shared files ===
@@ -479,7 +830,6 @@ class StorageEngine:
             WHERE sf.sender_fingerprint = ?
             ORDER BY sf.timestamp DESC
         """, (fingerprint,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_files_for_me(self, fingerprint: str) -> list:
@@ -490,7 +840,6 @@ class StorageEngine:
             WHERE sf.recipient_fingerprint = ? OR sf.is_public = 1
             ORDER BY sf.timestamp DESC
         """, (fingerprint,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_public_files(self) -> list:
@@ -501,13 +850,11 @@ class StorageEngine:
             WHERE sf.is_public = 1
             ORDER BY sf.timestamp DESC
         """).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_file_by_id(self, file_id: str) -> Optional[dict]:
         conn = self._get_conn()
         row = conn.execute("SELECT * FROM shared_files WHERE file_id = ?", (file_id,)).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     def delete_shared_file(self, file_id: str):
@@ -539,7 +886,6 @@ class StorageEngine:
             SELECT * FROM locations WHERE fingerprint = ?
             ORDER BY timestamp DESC LIMIT 100
         """, (fingerprint,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_shared_locations(self) -> list:
@@ -550,7 +896,6 @@ class StorageEngine:
             WHERE l.shared = 1
             ORDER BY l.timestamp DESC
         """).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_latest_locations(self) -> list:
@@ -563,7 +908,6 @@ class StorageEngine:
             )
             ORDER BY l.timestamp DESC
         """).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     # === SOS alerts ===
@@ -596,7 +940,6 @@ class StorageEngine:
             WHERE sa.active = 1 AND (sa.timestamp + sa.ttl) > ?
             ORDER BY sa.timestamp DESC
         """, (now,)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_all_sos(self) -> list:
@@ -606,7 +949,6 @@ class StorageEngine:
             LEFT JOIN profiles p ON sa.sender_fingerprint = p.fingerprint
             ORDER BY sa.timestamp DESC LIMIT 50
         """).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def deactivate_sos(self, alert_id: str):
@@ -640,7 +982,6 @@ class StorageEngine:
             WHERE c.is_public = 1
             ORDER BY c.created_at DESC
         """).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def get_channel(self, channel_id: str) -> Optional[dict]:
@@ -650,7 +991,6 @@ class StorageEngine:
             LEFT JOIN profiles p ON c.creator_fingerprint = p.fingerprint
             WHERE c.channel_id = ?
         """, (channel_id,)).fetchone()
-        conn.close()
         return dict(row) if row else None
 
     def post_channel_message(self, msg: dict):
@@ -675,7 +1015,6 @@ class StorageEngine:
             WHERE cm.channel_id = ?
             ORDER BY cm.timestamp DESC LIMIT ?
         """, (channel_id, limit)).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
 
     def delete_channel(self, channel_id: str):

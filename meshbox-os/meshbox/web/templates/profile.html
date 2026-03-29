@@ -22,6 +22,7 @@
         </div>
         <div class="panel-body">
             <form method="POST" action="/profile/update" class="form-inline">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">Nom / Pseudo</label>
@@ -86,6 +87,7 @@
         <p>Générez vos clés cryptographiques pour commencer à communiquer de manière sécurisée sur le réseau mesh.</p>
 
         <form method="POST" action="/profile/create" class="setup-form">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
                 <label class="form-label">Nom / Pseudo *</label>
                 <input type="text" name="name" class="form-input" required

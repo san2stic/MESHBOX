@@ -146,4 +146,100 @@
         </div>
     </div>
 </div>
+
+<!-- Tor Network -->
+{% if tor_enabled is defined %}
+<div class="panel">
+    <div class="panel-header">
+        <h2>🧅 Réseau Tor</h2>
+        <form method="POST" action="/tor/toggle" style="display:inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn {{ 'btn-danger-ghost' if tor_enabled else 'btn-primary' }} btn-sm">
+                {{ '🔴 Désactiver' if tor_enabled else '🟢 Activer' }} Tor
+            </button>
+        </form>
+    </div>
+    <div class="panel-body">
+        {% if onion_address %}
+        <div class="config-item" style="margin-bottom: 15px">
+            <span class="config-label">Adresse .onion</span>
+            <code class="config-value">{{ onion_address }}</code>
+        </div>
+        {% endif %}
+
+        <div class="stats-grid small" style="margin-bottom: 15px">
+            <div class="stat-card">
+                <div class="stat-data">
+                    <span class="stat-number">{{ tor_peers|length if tor_peers else 0 }}</span>
+                    <span class="stat-label">Pairs Tor</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-data">
+                    <span class="stat-number">{{ active_tor_peers|length if active_tor_peers else 0 }}</span>
+                    <span class="stat-label">Pairs Tor actifs</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-data">
+                    <span class="stat-number">{{ directory_nodes|length if directory_nodes else 0 }}</span>
+                    <span class="stat-label">Nœuds annuaire</span>
+                </div>
+            </div>
+        </div>
+
+        {% if tor_peers %}
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Nom</th>
+                        <th>Adresse .onion</th>
+                        <th>Dernière vue</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in tor_peers %}
+                    <tr>
+                        <td>{{ p.name or 'Sans nom' }}</td>
+                        <td><code>{{ p.onion_address }}</code></td>
+                        <td>{{ p.time_ago if p.time_ago else '—' }}</td>
+                        <td>
+                            <form method="POST" action="/tor/delete-peer/{{ p.fingerprint }}" style="display:inline">
+                                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn btn-danger-ghost btn-sm" onclick="return confirm('Supprimer ce pair Tor ?')">🗑</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">🧅</span>
+            <p>Aucun pair Tor</p>
+        </div>
+        {% endif %}
+
+        <!-- Add Tor Peer -->
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border);">
+            <h3 style="margin-bottom: 10px">Ajouter un pair Tor</h3>
+            <form method="POST" action="/tor/add-peer" style="display:flex; gap: 10px; align-items:end; flex-wrap:wrap">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group" style="flex:1; min-width:200px; margin:0">
+                    <label class="form-label">Adresse .onion</label>
+                    <input type="text" name="onion_address" class="form-input" placeholder="xxxxxxxx.onion" required>
+                </div>
+                <div class="form-group" style="flex:1; min-width:150px; margin:0">
+                    <label class="form-label">Nom (optionnel)</label>
+                    <input type="text" name="name" class="form-input" placeholder="Mon ami">
+                </div>
+                <button type="submit" class="btn btn-primary">➕ Ajouter</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
 {% endblock %}

@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div class="page-header-left">
+        <h2>🧅 Tor</h2>
+    </div>
+    <div class="page-header-right">
+        <form method="POST" action="/tor/toggle" style="display:inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn {{ 'btn-danger-ghost' if tor_enabled else 'btn-primary' }}">
+                {{ '🔴 Désactiver' if tor_enabled else '🟢 Activer' }} Tor
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Tor Status -->
+<div class="stats-grid small">
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ '🟢' if tor_enabled else '🔴' }}</span>
+            <span class="stat-label">{{ 'Actif' if tor_enabled else 'Inactif' }}</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ tor_peers|length if tor_peers else 0 }}</span>
+            <span class="stat-label">Pairs Tor</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ active_tor_peers|length if active_tor_peers else 0 }}</span>
+            <span class="stat-label">Pairs Tor actifs</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ directory_nodes|length if directory_nodes else 0 }}</span>
+            <span class="stat-label">Nœuds annuaire</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-data">
+            <span class="stat-number">{{ '📗' if directory_node_enabled else '📕' }}</span>
+            <span class="stat-label">{{ 'Annuaire actif' if directory_node_enabled else 'Annuaire inactif' }}</span>
+        </div>
+    </div>
+</div>
+
+<!-- Mon Adresse .onion -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>📤 Partager mon contact</h2>
+    </div>
+    <div class="panel-body">
+        {% if onion_address %}
+        <div class="config-item" style="margin-bottom: 12px;">
+            <span class="config-label">Votre adresse .onion</span>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <code class="config-value" id="onion-addr" style="word-break: break-all;">{{ onion_address }}</code>
+                <button type="button" class="btn btn-primary btn-sm" onclick="copyToClipboard('onion-addr')" title="Copier l'adresse">📋 Copier</button>
+            </div>
+        </div>
+        {% if profile %}
+        <div class="config-item" style="margin-bottom: 12px;">
+            <span class="config-label">Votre nom</span>
+            <span class="config-value">{{ profile.name }}</span>
+        </div>
+        <div class="config-item" style="margin-bottom: 12px;">
+            <span class="config-label">Votre fingerprint</span>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <code class="config-value" id="my-fingerprint" style="word-break: break-all;">{{ profile.fingerprint }}</code>
+                <button type="button" class="btn btn-primary btn-sm" onclick="copyToClipboard('my-fingerprint')" title="Copier le fingerprint">📋 Copier</button>
+            </div>
+        </div>
+        {% endif %}
+        <p style="margin-top: 10px; color: var(--text-muted); font-size: 0.85rem;">
+            Partagez votre adresse .onion avec d'autres utilisateurs MeshBox pour qu'ils puissent vous contacter via Tor.
+        </p>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">🧅</span>
+            <p>Adresse .onion non disponible</p>
+            <span class="empty-hint">Activez Tor et redémarrez le daemon pour générer votre adresse .onion.</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+function copyToClipboard(elementId) {
+    var text = document.getElementById(elementId).innerText;
+    navigator.clipboard.writeText(text).then(function() {
+        var btn = event.target;
+        var original = btn.textContent;
+        btn.textContent = '✅ Copié !';
+        setTimeout(function() { btn.textContent = original; }, 2000);
+    });
+}
+</script>
+
+<!-- Tor Peers -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>👥 Pairs Tor</h2>
+    </div>
+    <div class="panel-body">
+        {% if tor_peers %}
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Nom</th>
+                        <th>Adresse .onion</th>
+                        <th>Dernière vue</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in tor_peers %}
+                    <tr>
+                        <td>{{ p.name or 'Sans nom' }}</td>
+                        <td><code>{{ p.onion_address }}</code></td>
+                        <td>{{ p.time_ago if p.time_ago else '—' }}</td>
+                        <td>
+                            <form method="POST" action="/tor/delete-peer/{{ p.fingerprint }}" style="display:inline">
+                                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn btn-danger-ghost btn-sm" onclick="return confirm('Supprimer ce pair Tor ?')">🗑</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">🧅</span>
+            <p>Aucun pair Tor</p>
+            <span class="empty-hint">Ajoutez des pairs Tor ci-dessous pour communiquer via le réseau Tor.</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Add Tor Peer -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>➕ Ajouter un pair Tor</h2>
+    </div>
+    <div class="panel-body">
+        <form method="POST" action="/tor/add-peer" style="display:flex; gap: 10px; align-items:end; flex-wrap:wrap">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group" style="flex:1; min-width:200px; margin:0">
+                <label class="form-label">Adresse .onion</label>
+                <input type="text" name="onion_address" class="form-input" placeholder="xxxxxxxx.onion" required>
+            </div>
+            <div class="form-group" style="flex:1; min-width:150px; margin:0">
+                <label class="form-label">Nom (optionnel)</label>
+                <input type="text" name="name" class="form-input" placeholder="Mon ami">
+            </div>
+            <button type="submit" class="btn btn-primary">➕ Ajouter</button>
+        </form>
+    </div>
+</div>
+
+<!-- Tor Configuration -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>⚙️ Configuration Tor</h2>
+    </div>
+    <div class="panel-body">
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Port SOCKS5</span>
+                <span class="config-value">9050</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Port contrôle</span>
+                <span class="config-value">9051</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Type de clé</span>
+                <span class="config-value">ED25519-V3</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Hidden Service</span>
+                <span class="config-value">Éphémère</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Directory Node -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>📒 Nœud Annuaire</h2>
+        <form method="POST" action="/tor/toggle-directory" style="display:inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn {{ 'btn-danger-ghost' if directory_node_enabled else 'btn-primary' }} btn-sm">
+                {{ '🔴 Désactiver' if directory_node_enabled else '🟢 Activer' }}
+            </button>
+        </form>
+    </div>
+    <div class="panel-body">
+        {% if directory_node_enabled %}
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+            <span style="font-size: 1.2rem;">📗</span>
+            <span style="color: var(--accent); font-weight: 600;">Nœud annuaire actif</span>
+        </div>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">
+            Ce nœud sert d'annuaire pour le réseau MeshBox. Les autres nœuds peuvent s'y enregistrer et découvrir des pairs via ce nœud.
+        </p>
+        <div class="config-grid">
+            <div class="config-item">
+                <span class="config-label">Pairs enregistrés</span>
+                <span class="config-value" style="color: var(--accent);">{{ announced_peers_count }}</span>
+            </div>
+            <div class="config-item">
+                <span class="config-label">Nœuds annuaire connus</span>
+                <span class="config-value" style="color: var(--accent);">{{ directory_nodes|length if directory_nodes else 0 }}</span>
+            </div>
+        </div>
+        {% else %}
+        <div class="empty-state small">
+            <span class="empty-icon">📒</span>
+            <p>Nœud annuaire inactif</p>
+            <span class="empty-hint">
+                Activez le mode annuaire pour que ce nœud serve de répertoire pour le réseau MeshBox.
+                Les autres nœuds pourront s'enregistrer et découvrir des pairs via votre nœud.
+                Nécessite que Tor soit actif.
+            </span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

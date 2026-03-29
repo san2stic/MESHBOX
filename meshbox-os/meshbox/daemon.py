@@ -1,10 +1,16 @@
 """
-MeshBox Daemon (meshboxd)
+MeshBox Daemon v4 (meshboxd)
 Main daemon that coordinates all components:
-- Network discovery (WiFi + Bluetooth)
+- Network discovery (WiFi + Bluetooth + Tor)
 - Profile and message exchange
-- Store-and-forward protocol
-- Periodic cleanup
+- Store-and-forward protocol with epidemic routing
+- Onion routing for sender anonymity
+- Message deduplication and hop limiting
+- Delivery receipts and acknowledgments
+- Periodic cleanup (TTL, disappearing messages)
+- Tor hidden service for internet-based P2P
+- Peer gossip for relay optimization
+- Adaptive sync intervals
 """
 
 import asyncio
@@ -19,10 +25,12 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from meshbox.config import DATA_DIR
+from meshbox.config import DATA_DIR, TOR_ENABLED_DEFAULT
 from meshbox.crypto import Identity, CryptoEngine
 from meshbox.files import FileManager
-from meshbox.network import NetworkManager, PeerInfo, MessageTransport
+from meshbox.network import (
+    NetworkManager, PeerInfo, MessageTransport, OnionLayer, MAX_HOP_COUNT,
+)
 from meshbox.profiles import ProfileManager
 from meshbox.storage import StorageEngine
 
@@ -38,7 +46,11 @@ class MeshBoxDaemon:
         self.profile_mgr = ProfileManager(self.storage, self.data_dir / "keys")
         self.file_mgr: Optional[FileManager] = None
         self.network: Optional[NetworkManager] = None
+        self.tor_manager = None
+        self.directory_client = None
         self._running = False
+        self._sync_interval = 30  # adaptive: starts at 30s, adjusts based on activity
+        self._last_activity = time.time()
 
     @property
     def is_initialized(self) -> bool:
@@ -51,8 +63,12 @@ class MeshBoxDaemon:
             return
 
         profile = self.profile_mgr.export_profile_for_sharing()
-        logging.info("Starting MeshBox daemon - %s (%s)",
+        logging.info("Starting MeshBox daemon v4 - %s (%s)",
                      profile["name"], profile["fingerprint"])
+
+        # Wire storage-backed nonce tracker into crypto engine
+        if self.profile_mgr.crypto:
+            self.profile_mgr.crypto.nonce_tracker._storage = self.storage
 
         self.file_mgr = FileManager(
             self.storage, self.profile_mgr.identity,
@@ -62,6 +78,7 @@ class MeshBoxDaemon:
         self.network = NetworkManager(profile)
         self.network.on_peer_discovered = self._on_peer_discovered
         self.network.on_message_received = self._on_message_received
+        self.network.on_delivery_receipt = self._on_delivery_receipt
         self.network.transport.on_sync_request = self._handle_sync_request
 
         self._running = True
@@ -71,6 +88,11 @@ class MeshBoxDaemon:
             asyncio.create_task(self._periodic_sync()),
             asyncio.create_task(self._periodic_cleanup()),
         ]
+
+        # Start Tor if enabled
+        tor_enabled = self.storage.get_setting("tor_enabled", str(TOR_ENABLED_DEFAULT).lower())
+        if tor_enabled == "true":
+            tasks.append(asyncio.create_task(self._start_tor()))
 
         loop = asyncio.get_event_loop()
         if sys.platform != "win32":
@@ -89,6 +111,72 @@ class MeshBoxDaemon:
         self._running = False
         if self.network:
             self.network.stop()
+        if self.tor_manager:
+            try:
+                self.tor_manager.stop()
+            except Exception:
+                pass
+        self.storage.close()
+
+    async def _start_tor(self):
+        """Initialize Tor hidden service and directory client."""
+        try:
+            from meshbox.tor import TorManager
+            from meshbox.directory import DirectoryClient
+
+            self.tor_manager = TorManager(self.data_dir)
+            started = await self.tor_manager.start()
+            if not started:
+                logging.warning("Tor failed to start - internet P2P disabled")
+                return
+
+            onion = self.tor_manager.onion_address
+            logging.info("Tor hidden service: %s", onion)
+
+            # Register with network manager
+            if self.network:
+                self.network.set_tor_transport(self.tor_manager)
+
+            # Start directory client for peer discovery
+            profile = self.profile_mgr.export_profile_for_sharing()
+            self.directory_client = DirectoryClient(
+                self.storage, self.tor_manager, profile
+            )
+
+            # Check if directory node mode is enabled
+            dir_enabled = self.storage.get_setting("directory_node_enabled", "false") == "true"
+            if dir_enabled:
+                self.directory_client.set_directory_mode(True)
+                logging.info("Directory node mode is ACTIVE - serving as directory node")
+
+            # Wire directory handlers into network transport
+            if self.network:
+                self.network.transport.on_directory_announce = self.directory_client.handle_announce
+                self.network.transport.on_directory_query = self.directory_client.handle_query
+                self.network.transport.on_peer_gossip = self.directory_client.handle_gossip
+
+            await self.directory_client.start()
+
+        except ImportError:
+            logging.info("Tor modules not available (install stem + PySocks)")
+        except Exception as e:
+            logging.error("Tor initialization failed: %s", e)
+
+    async def _on_delivery_receipt(self, receipt: dict):
+        """Handle incoming delivery receipts."""
+        msg_id = receipt.get("message_id", "")
+        sender = receipt.get("sender_fingerprint", "")
+        receipt_type = receipt.get("type", "receipt")
+
+        if receipt_type == "receipt_ack":
+            logging.debug("Receipt ACK for %s from %s", msg_id, sender)
+            return
+
+        if msg_id:
+            self.storage.save_delivery_receipt(msg_id, sender)
+            self.storage.update_delivery_status(msg_id, "delivered")
+            logging.info("Delivery receipt: %s confirmed by %s", msg_id, sender)
+            self._last_activity = time.time()
 
     async def _on_peer_discovered(self, peer: PeerInfo):
         logging.info("New peer discovered: %s via %s",
@@ -105,6 +193,25 @@ class MeshBoxDaemon:
 
     async def _on_message_received(self, message: dict):
         msg_type = message.get("type", "message")
+
+        # Handle onion-routed messages
+        if msg_type == "onion" or message.get("onion"):
+            await self._handle_onion_message(message)
+            return
+
+        # Deduplicate: check if we've already seen this message
+        msg_id = message.get("message_id", "")
+        if msg_id and self.storage.is_message_seen(msg_id):
+            logging.debug("Duplicate message ignored: %s", msg_id)
+            return
+        if msg_id:
+            self.storage.mark_message_seen(msg_id)
+
+        # Check hop count
+        hop_count = message.get("hop_count", 0)
+        if hop_count > MAX_HOP_COUNT:
+            logging.warning("Message %s exceeded max hops (%d), dropping", msg_id, hop_count)
+            return
 
         if msg_type == "sos":
             logging.info("SOS alert received from %s", message.get("sender_fingerprint", "???"))
@@ -133,7 +240,6 @@ class MeshBoxDaemon:
             self._save_received_file(message)
             return
 
-        msg_id = message.get("message_id", "???")
         recipient = message.get("recipient_fingerprint", "")
         sender = message.get("sender_fingerprint", "")
 
@@ -151,11 +257,68 @@ class MeshBoxDaemon:
         if recipient == my_fingerprint:
             logging.info("Message received from %s (id: %s)", sender, msg_id)
             message["delivered"] = 1
+            message["delivery_status"] = "delivered"
             self.storage.save_message(message)
+            # Update trust for the sender
+            self.storage.update_trust_score(sender, True)
+            self._last_activity = time.time()
+
+            # Send delivery receipt back
+            if self.network and sender:
+                asyncio.create_task(self._send_delivery_receipt(sender, msg_id))
         else:
             logging.info("Relay message for %s from %s (id: %s)",
                          recipient, sender, msg_id)
+            # Increment hop count before relaying
+            message["hop_count"] = hop_count + 1
             self.storage.save_relay_message(message)
+
+    async def _handle_onion_message(self, message: dict):
+        """Handle an onion-routed message: unwrap our layer and process/forward."""
+        if not self.profile_mgr.identity:
+            return
+
+        inner = OnionLayer.unwrap_onion(message, self.profile_mgr.identity.box_key)
+        if inner is None:
+            logging.warning("Failed to unwrap onion layer")
+            return
+
+        # Check if the inner payload is another onion layer
+        if inner.get("onion"):
+            next_hop = inner.get("next_hop", "")
+            if self.network and next_hop:
+                result = await self.network.send_to_peer_or_tor(next_hop, "onion", inner)
+                if result:
+                    logging.info("Forwarding onion message to %s", next_hop)
+                else:
+                    # Store for later relay when the peer comes online
+                    relay_msg = {
+                        "message_id": f"onion-{uuid.uuid4()}",
+                        "sender_fingerprint": "__ONION__",
+                        "recipient_fingerprint": next_hop,
+                        "encrypted_payload": inner,
+                        "timestamp": int(time.time()),
+                        "ttl": 86400,
+                        "hop_count": 0,
+                    }
+                    self.storage.save_relay_message(relay_msg)
+        else:
+            # Final destination: process the inner message
+            await self._on_message_received(inner)
+
+    async def _send_delivery_receipt(self, recipient_fp: str, message_id: str):
+        """Send a delivery receipt to the sender."""
+        try:
+            receipt_payload = {
+                "message_id": message_id,
+                "sender_fingerprint": self.profile_mgr.identity.fingerprint,
+                "timestamp": int(time.time()),
+            }
+            await self.network.send_to_peer_or_tor(
+                recipient_fp, "receipt", receipt_payload
+            )
+        except Exception as e:
+            logging.debug("Failed to send delivery receipt: %s", e)
 
     async def _sync_with_peer(self, peer: PeerInfo):
         if not self.network or peer.connection_type != "wifi":
@@ -191,6 +354,7 @@ class MeshBoxDaemon:
                         self.storage.delete_relay_message(msg["message_id"])
                     logging.info("  %d messages delivered to %s",
                                  len(relay_messages), peer.fingerprint)
+                    self.storage.update_trust_score(peer.fingerprint, True)
 
             # Sync broadcast messages (channels, files, SOS)
             broadcast_relay = []
@@ -242,6 +406,7 @@ class MeshBoxDaemon:
 
         except Exception as e:
             logging.error("Sync error with %s: %s", peer.fingerprint, e)
+            self.storage.update_trust_score(peer.fingerprint, False)
 
     async def _handle_sync_request(self, request: dict) -> dict:
         local_profile = self.profile_mgr.get_local_profile()
@@ -251,6 +416,11 @@ class MeshBoxDaemon:
         response = {"status": "ok", "messages_for_you": [], "relay_messages": []}
 
         for msg in request.get("messages_for_you", []):
+            # Deduplicate incoming sync messages
+            msg_id = msg.get("message_id", "")
+            if msg_id and self.storage.is_message_seen(msg_id):
+                continue
+
             payload = msg.get("encrypted_payload", {})
             if isinstance(payload, dict):
                 msg_type = payload.get("type", "")
@@ -270,7 +440,11 @@ class MeshBoxDaemon:
 
         return response
 
-    def send_message(self, recipient_fingerprint: str, plaintext: str) -> dict:
+    def send_message(self, recipient_fingerprint: str, plaintext: str,
+                     disappear_after_read: bool = False,
+                     disappear_timer: int = 0,
+                     use_onion: bool = False) -> dict:
+        """Send an encrypted message with optional disappearing and onion routing."""
         if not self.profile_mgr.crypto:
             raise RuntimeError("Profile not initialized")
 
@@ -290,13 +464,29 @@ class MeshBoxDaemon:
             "timestamp": int(time.time()),
             "ttl": 604800,
             "hop_count": 0,
+            "disappear_after_read": 1 if disappear_after_read else 0,
+            "disappear_timer": disappear_timer,
         }
 
         pow_data = f"{message['message_id']}{message['timestamp']}".encode()
         message["proof_of_work"] = CryptoEngine.generate_proof_of_work(pow_data, difficulty=16)
 
         self.storage.save_message(message)
-        self.storage.save_relay_message(message)
+
+        # Optionally wrap in onion layers for sender anonymity
+        relay_payload = message.copy()
+        if use_onion and self.network:
+            trusted_peers = self.network.get_trusted_peers(min_trust=0.4)
+            if len(trusted_peers) >= 2:
+                # Pick up to 3 intermediate hops
+                import random
+                route = random.sample(trusted_peers[:10], min(3, len(trusted_peers)))
+                relay_payload = OnionLayer.wrap_onion(
+                    message, route, self.profile_mgr.identity.box_key
+                )
+                logging.info("Message wrapped in %d onion layers", len(route))
+
+        self.storage.save_relay_message(relay_payload if not relay_payload.get("onion") else message)
 
         logging.info("Message sent to %s (id: %s)",
                      recipient_fingerprint, message["message_id"])
@@ -361,11 +551,52 @@ class MeshBoxDaemon:
 
     async def _periodic_sync(self):
         while self._running:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self._sync_interval)
+
+            # Adaptive sync: sync more frequently when active
+            idle_time = time.time() - self._last_activity
+            if idle_time < 60:
+                self._sync_interval = 15  # very active
+            elif idle_time < 300:
+                self._sync_interval = 30  # moderately active
+            else:
+                self._sync_interval = 120  # idle
+
             if self.network:
                 for peer in self.network.get_peers():
                     if peer.connection_type == "wifi":
                         await self._sync_with_peer(peer)
+
+                # Also sync with Tor peers
+                if self.tor_manager and self.directory_client:
+                    tor_peers = self.storage.get_active_tor_peers()
+                    for tp in tor_peers[:10]:  # limit to 10 most active
+                        await self._sync_with_tor_peer(tp)
+
+    async def _sync_with_tor_peer(self, tor_peer: dict):
+        """Sync relay messages with a Tor peer."""
+        if not self.tor_manager or not self.network:
+            return
+        try:
+            fp = tor_peer["fingerprint"]
+            relay_messages = self.storage.get_relay_messages_for(fp)
+            if relay_messages:
+                for msg in relay_messages:
+                    msg["encrypted_payload"] = json.loads(msg["encrypted_payload"]) \
+                        if isinstance(msg["encrypted_payload"], str) else msg["encrypted_payload"]
+                resp = await self.tor_manager.send_to_onion(
+                    fp, "sync", {
+                        "sender_fingerprint": self.profile_mgr.identity.fingerprint,
+                        "messages_for_you": relay_messages,
+                        "relay_messages": [],
+                    }
+                )
+                if resp and resp.get("status") == "ok":
+                    for msg in relay_messages:
+                        self.storage.delete_relay_message(msg["message_id"])
+                    logging.info("Tor sync: %d messages to %s", len(relay_messages), fp[:8])
+        except Exception as e:
+            logging.debug("Tor sync error with %s: %s", tor_peer.get("fingerprint", "?")[:8], e)
 
     async def _periodic_cleanup(self):
         while self._running:

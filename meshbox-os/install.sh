@@ -25,6 +25,17 @@ case "$OS" in
 esac
 info "Detected platform: $PLATFORM"
 
+# ── Resolve real user when running under sudo ─────────────────
+if [[ -n "${SUDO_UID:-}" ]]; then
+    REAL_UID="$SUDO_UID"
+    REAL_USER="${SUDO_USER:-$(id -un "$SUDO_UID")}"
+    REAL_HOME=$(eval echo "~$REAL_USER")
+else
+    REAL_UID="$(id -u)"
+    REAL_USER="$(id -un)"
+    REAL_HOME="$HOME"
+fi
+
 # ── Locate project root (same dir as this script) ────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info "Project directory: $SCRIPT_DIR"
@@ -82,7 +93,7 @@ ok "pip available"
 
 # ── Create / reuse a virtual environment ──────────────────────
 # Use ~/.meshbox/venv so launchd can access it (macOS blocks ~/Documents)
-VENV_DIR="${MESHBOX_DATA_DIR:-$HOME/.meshbox}/venv"
+VENV_DIR="${MESHBOX_DATA_DIR:-$REAL_HOME/.meshbox}/venv"
 mkdir -p "$(dirname "$VENV_DIR")"
 if [[ ! -d "$VENV_DIR" ]]; then
     info "Creating virtual environment in $VENV_DIR ..."
@@ -105,7 +116,7 @@ ok "meshbox installed ($(meshbox --version 2>&1 || echo 'v?'))"
 
 # ── Determine paths for services ──────────────────────────────
 MESHBOX_BIN="$(command -v meshbox)"
-MESHBOX_DATA_DIR="${MESHBOX_DATA_DIR:-$HOME/.meshbox}"
+MESHBOX_DATA_DIR="${MESHBOX_DATA_DIR:-$REAL_HOME/.meshbox}"
 mkdir -p "$MESHBOX_DATA_DIR"
 
 info "meshbox binary : $MESHBOX_BIN"
@@ -180,7 +191,7 @@ EOF
 install_launchd_services() {
     info "Setting up macOS launchd services..."
 
-    local plist_dir="$HOME/Library/LaunchAgents"
+    local plist_dir="$REAL_HOME/Library/LaunchAgents"
     mkdir -p "$plist_dir"
 
     # ── com.meshbox.daemon.plist ──────────────────────────────
@@ -260,24 +271,30 @@ EOF
     # ── Create log directory ──────────────────────────────────
     mkdir -p "$MESHBOX_DATA_DIR/logs"
 
+    # ── Fix ownership if running under sudo ───────────────────
+    if [[ -n "${SUDO_UID:-}" ]]; then
+        chown "$REAL_USER" "$plist_dir/com.meshbox.daemon.plist" "$plist_dir/com.meshbox.web.plist"
+        chown -R "$REAL_USER" "$MESHBOX_DATA_DIR"
+    fi
+
     # ── Unload existing (ignore errors) then load ─────────────
-    launchctl bootout "gui/$(id -u)/com.meshbox.daemon" 2>/dev/null || true
-    launchctl bootout "gui/$(id -u)/com.meshbox.web"    2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$plist_dir/com.meshbox.daemon.plist"
-    launchctl bootstrap "gui/$(id -u)" "$plist_dir/com.meshbox.web.plist"
+    launchctl bootout "gui/$REAL_UID/com.meshbox.daemon" 2>/dev/null || true
+    launchctl bootout "gui/$REAL_UID/com.meshbox.web"    2>/dev/null || true
+    launchctl bootstrap "gui/$REAL_UID" "$plist_dir/com.meshbox.daemon.plist"
+    launchctl bootstrap "gui/$REAL_UID" "$plist_dir/com.meshbox.web.plist"
     ok "launchd services loaded and running"
 
     echo ""
     info "Useful commands:"
     echo "  launchctl list | grep meshbox"
-    echo "  launchctl kickstart -k gui/$(id -u)/com.meshbox.daemon   # restart daemon"
-    echo "  launchctl kickstart -k gui/$(id -u)/com.meshbox.web      # restart web"
+    echo "  launchctl kickstart -k gui/$REAL_UID/com.meshbox.daemon   # restart daemon"
+    echo "  launchctl kickstart -k gui/$REAL_UID/com.meshbox.web      # restart web"
     echo "  tail -f $MESHBOX_DATA_DIR/logs/daemon.log"
     echo "  tail -f $MESHBOX_DATA_DIR/logs/web.log"
     echo ""
     echo "  # To stop services:"
-    echo "  launchctl bootout gui/$(id -u)/com.meshbox.daemon"
-    echo "  launchctl bootout gui/$(id -u)/com.meshbox.web"
+    echo "  launchctl bootout gui/$REAL_UID/com.meshbox.daemon"
+    echo "  launchctl bootout gui/$REAL_UID/com.meshbox.web"
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -296,6 +313,101 @@ if [[ ! -d "$MESHBOX_DATA_DIR/keys" ]] || [[ -z "$(ls -A "$MESHBOX_DATA_DIR/keys
         warn "The daemon will NOT start until a profile exists."
     fi
 fi
+
+# ══════════════════════════════════════════════════════════════
+#  TOR INSTALLATION & CONFIGURATION
+# ══════════════════════════════════════════════════════════════
+
+install_tor() {
+    info "Setting up Tor for .onion hidden service..."
+
+    # ── Install Tor if not present ────────────────────────────
+    if ! command -v tor &>/dev/null; then
+        info "Installing Tor..."
+        if [[ "$PLATFORM" == "macos" ]]; then
+            if command -v brew &>/dev/null; then
+                brew install tor
+            else
+                fail "Homebrew not found. Install Tor manually: brew install tor"
+            fi
+        else
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update && sudo apt-get install -y tor
+            elif command -v dnf &>/dev/null; then
+                sudo dnf install -y tor
+            elif command -v pacman &>/dev/null; then
+                sudo pacman -S --noconfirm tor
+            else
+                warn "Could not install Tor automatically. Install it manually."
+                return 1
+            fi
+        fi
+        ok "Tor installed ($(tor --version | head -1))"
+    else
+        ok "Tor already installed ($(tor --version | head -1))"
+    fi
+
+    # ── Configure Tor with ControlPort ────────────────────────
+    if [[ "$PLATFORM" == "macos" ]]; then
+        TORRC="/opt/homebrew/etc/tor/torrc"
+        # Fallback for Intel Macs
+        [[ ! -d "/opt/homebrew/etc/tor" ]] && TORRC="/usr/local/etc/tor/torrc"
+    else
+        TORRC="/etc/tor/torrc"
+    fi
+
+    local torrc_dir
+    torrc_dir="$(dirname "$TORRC")"
+    mkdir -p "$torrc_dir"
+
+    # Only write config if ControlPort is not already configured
+    if ! grep -q "^ControlPort 9051" "$TORRC" 2>/dev/null; then
+        info "Configuring Tor (ControlPort 9051)..."
+        cat > "$TORRC" <<TOREOF
+SocksPort 9050
+ControlPort 9051
+CookieAuthentication 1
+TOREOF
+        ok "Tor configured ($TORRC)"
+    else
+        ok "Tor already configured with ControlPort"
+    fi
+
+    # ── Start Tor service ─────────────────────────────────────
+    if [[ "$PLATFORM" == "macos" ]]; then
+        if ! brew services list | grep -q "tor.*started"; then
+            info "Starting Tor service..."
+            brew services start tor
+            ok "Tor service started"
+        else
+            ok "Tor service already running"
+        fi
+    else
+        if ! systemctl is-active --quiet tor 2>/dev/null; then
+            info "Starting Tor service..."
+            sudo systemctl enable tor
+            sudo systemctl start tor
+            ok "Tor service started"
+        else
+            ok "Tor service already running"
+        fi
+    fi
+
+    # ── Wait for Tor to be ready ──────────────────────────────
+    info "Waiting for Tor to establish circuits..."
+    local retries=0
+    while ! nc -z 127.0.0.1 9051 2>/dev/null; do
+        retries=$((retries + 1))
+        if (( retries > 15 )); then
+            warn "Tor ControlPort not reachable after 15s. Daemon will retry on start."
+            return 0
+        fi
+        sleep 1
+    done
+    ok "Tor ControlPort ready"
+}
+
+install_tor
 
 # ── Install services ──────────────────────────────────────────
 if [[ "$PLATFORM" == "linux" ]]; then

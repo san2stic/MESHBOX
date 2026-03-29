@@ -6,6 +6,7 @@
     <title>MeshBox — {{ title|default('Dashboard') }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
 </head>
 <body>
     <!-- Mobile overlay -->
@@ -18,7 +19,7 @@
                 <div class="brand-icon">📡</div>
                 <div class="brand-text">
                     <h1>MeshBox</h1>
-                    <span class="brand-version">v1.0.0</span>
+                    <span class="brand-version">v4.0.0</span>
                 </div>
                 <button class="sidebar-close" id="sidebarClose">✕</button>
             </div>
@@ -97,6 +98,10 @@
                     <a href="/qr" class="nav-item {{ 'active' if active == 'qr' }}">
                         <span class="nav-icon">📱</span>
                         <span>QR Code</span>
+                    </a>
+                    <a href="/tor" class="nav-item {{ 'active' if active == 'tor' }}">
+                        <span class="nav-icon">🧅</span>
+                        <span>Tor</span>
                     </a>
                     <a href="/settings" class="nav-item {{ 'active' if active == 'settings' }}">
                         <span class="nav-icon">⚙️</span>

@@ -1,11 +1,18 @@
 """
-MeshBox - Web UI (optional).
+MeshBox - Web UI v4 (optional).
 Local Flask server for managing MeshBox via a browser.
+Features:
+- Server-Sent Events (SSE) for real-time updates
+- CSRF protection on all POST forms
+- Tor connectivity management
+- Paginated inbox/outbox
+- Delivery status tracking
 """
 
 import hashlib
 import json
 import os
+import secrets
 import time
 import uuid
 from io import BytesIO
@@ -13,6 +20,7 @@ from pathlib import Path
 
 from flask import (
     Flask,
+    Response,
     render_template,
     request,
     jsonify,
@@ -21,13 +29,28 @@ from flask import (
     flash,
     session,
     send_file,
+    abort,
 )
 
-from meshbox.config import DATA_DIR
+from meshbox.config import DATA_DIR, MAX_FILE_SIZE
 from meshbox.crypto import Identity, CryptoEngine
 from meshbox.files import FileManager
 from meshbox.profiles import ProfileManager
 from meshbox.storage import StorageEngine
+
+
+def _get_or_create_secret_key(data_dir: Path) -> str:
+    """Generate and persist a cryptographically secure secret key."""
+    key_file = data_dir / ".web_secret"
+    if key_file.exists():
+        return key_file.read_text().strip()
+    key = os.urandom(32).hex()
+    key_file.write_text(key)
+    try:
+        key_file.chmod(0o600)
+    except OSError:
+        pass
+    return key
 
 
 def create_app(data_dir: Path = None) -> Flask:
@@ -40,10 +63,40 @@ def create_app(data_dir: Path = None) -> Flask:
         template_folder=str(Path(__file__).parent / "templates"),
         static_folder=str(Path(__file__).parent / "static"),
     )
-    app.secret_key = os.environ.get(
-        "MESHBOX_SECRET_KEY",
-        hashlib.sha256(str(data_dir).encode()).hexdigest(),
-    )
+    app.secret_key = _get_or_create_secret_key(data_dir)
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+    # Security headers
+    @app.after_request
+    def add_security_headers(response):
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+        return response
+
+    # CSRF protection
+    def _generate_csrf_token():
+        if '_csrf_token' not in session:
+            session['_csrf_token'] = secrets.token_hex(32)
+        return session['_csrf_token']
+
+    def _validate_csrf():
+        token = request.form.get('_csrf_token') or request.headers.get('X-CSRF-Token', '')
+        if not token or token != session.get('_csrf_token'):
+            abort(403)
+
+    app.jinja_env.globals['csrf_token'] = _generate_csrf_token
+
+    @app.before_request
+    def csrf_protect():
+        if request.method == "POST":
+            # Skip CSRF for JSON API and setup
+            if request.is_json or request.endpoint in ('setup', 'api_status'):
+                return
+            _validate_csrf()
 
     # Components stored in app config
     storage = StorageEngine(data_dir / "meshbox.db")
@@ -149,9 +202,11 @@ def create_app(data_dir: Path = None) -> Flask:
                 profile = profile_mgr.get_local_profile()
 
                 if has_password and password and len(password) >= 6:
-                    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+                    # Use PBKDF2 for password hashing
+                    salt = os.urandom(16)
+                    pw_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
                     pw_file = data_dir / ".web_password"
-                    pw_file.write_text(pw_hash)
+                    pw_file.write_bytes(salt + pw_hash)
                     try:
                         pw_file.chmod(0o600)
                     except OSError:
@@ -201,13 +256,22 @@ def create_app(data_dir: Path = None) -> Flask:
         if not p:
             return redirect(url_for("profile_page"))
 
-        messages = storage.get_inbox(p["fingerprint"])
+        page = request.args.get("page", 1, type=int)
+        per_page = 20
+        offset = (page - 1) * per_page
+        total = storage.get_inbox_count(p["fingerprint"])
+        messages = storage.get_inbox(p["fingerprint"], limit=per_page, offset=offset)
         for msg in messages:
             sender = storage.get_profile(msg["sender_fingerprint"])
             msg["sender_name"] = sender["name"] if sender else msg["sender_fingerprint"][:12]
             msg["time"] = time.strftime("%d/%m/%Y %H:%M", time.localtime(msg["timestamp"]))
+            msg["delivery_status"] = msg.get("delivery_status", "queued")
 
-        return render_template("inbox.html", title="Messages", active="inbox", messages=messages)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        return render_template(
+            "inbox.html", title="Messages", active="inbox", messages=messages,
+            page=page, total_pages=total_pages, total=total,
+        )
 
     # === Routes: Outbox ===
 
@@ -454,8 +518,8 @@ def create_app(data_dir: Path = None) -> Flask:
             return redirect(url_for("files_page"))
 
         file_data = uploaded.read()
-        if len(file_data) > 10 * 1024 * 1024:
-            flash("File too large (max 10 MB).", "error")
+        if len(file_data) > MAX_FILE_SIZE:
+            flash(f"File too large (max {MAX_FILE_SIZE // (1024*1024)} MB).", "error")
             return redirect(url_for("files_page"))
 
         try:
@@ -822,6 +886,134 @@ def create_app(data_dir: Path = None) -> Flask:
         if not p:
             return jsonify([])
         return jsonify(storage.get_public_files())
+
+    # === Server-Sent Events (SSE) ===
+
+    @app.route("/api/events")
+    def api_events():
+        """SSE endpoint for real-time updates."""
+        def event_stream():
+            last_check = int(time.time())
+            while True:
+                time.sleep(3)
+                try:
+                    p = profile_mgr.get_local_profile()
+                    if not p:
+                        continue
+                    stats = storage.get_stats()
+                    data = {
+                        "unread": stats.get("unread_messages", 0),
+                        "messages_today": stats.get("messages_today", 0),
+                        "active_sos": stats.get("active_sos", 0),
+                        "tor_peers": stats.get("active_tor_peers", 0),
+                        "timestamp": int(time.time()),
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                except GeneratorExit:
+                    return
+                except Exception:
+                    yield f"data: {json.dumps({'error': 'poll failed'})}\n\n"
+
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # === Tor management routes ===
+
+    @app.route("/tor")
+    def tor_page():
+        stats = storage.get_stats()
+        tor_enabled = storage.get_setting("tor_enabled", "true") == "true"
+        directory_node_enabled = storage.get_setting("directory_node_enabled", "false") == "true"
+        tor_peers = storage.get_all_tor_peers()
+        active_peers = storage.get_active_tor_peers()
+        directory_nodes = storage.get_directory_nodes()
+        announced_peers_count = storage.get_announced_peers_count()
+
+        onion_address = ""
+        onion_file = data_dir / "onion_address"
+        if onion_file.exists():
+            onion_address = onion_file.read_text().strip()
+
+        for p in tor_peers:
+            p["time_ago"] = _time_ago(p["last_seen"])
+
+        return render_template(
+            "tor.html", title="Tor", active="tor",
+            tor_enabled=tor_enabled,
+            directory_node_enabled=directory_node_enabled,
+            tor_peers=tor_peers,
+            active_tor_peers=active_peers,
+            directory_nodes=directory_nodes,
+            announced_peers_count=announced_peers_count,
+            onion_address=onion_address,
+        )
+
+    @app.route("/tor/toggle", methods=["POST"])
+    def tor_toggle():
+        current = storage.get_setting("tor_enabled", "true")
+        new_val = "false" if current == "true" else "true"
+        storage.set_setting("tor_enabled", new_val)
+        flash(f"Tor {'enabled' if new_val == 'true' else 'disabled'}. Restart daemon to apply.", "success")
+        return redirect(url_for("tor_page"))
+
+    @app.route("/tor/toggle-directory", methods=["POST"])
+    def tor_toggle_directory():
+        current = storage.get_setting("directory_node_enabled", "false")
+        new_val = "false" if current == "true" else "true"
+        storage.set_setting("directory_node_enabled", new_val)
+        if new_val == "true":
+            flash("Nœud annuaire activé. Redémarrez le daemon pour appliquer.", "success")
+        else:
+            flash("Nœud annuaire désactivé. Redémarrez le daemon pour appliquer.", "success")
+        return redirect(url_for("tor_page"))
+
+    @app.route("/tor/add-peer", methods=["POST"])
+    def tor_add_peer():
+        onion = request.form.get("onion_address", "").strip()
+        name = request.form.get("name", "").strip()
+        if not onion.endswith(".onion"):
+            flash("Invalid .onion address.", "error")
+            return redirect(url_for("tor_page"))
+        fp = onion.replace(".onion", "")[:16]
+        storage.save_tor_peer({
+            "fingerprint": fp,
+            "onion_address": onion,
+            "name": name,
+        })
+        flash(f"Tor peer added: {onion}", "success")
+        return redirect(url_for("tor_page"))
+
+    @app.route("/tor/delete-peer/<fingerprint>", methods=["POST"])
+    def tor_delete_peer(fingerprint):
+        storage.delete_tor_peer(fingerprint)
+        flash("Tor peer removed.", "success")
+        return redirect(url_for("tor_page"))
+
+    # === API: Tor ===
+
+    @app.route("/api/tor/status")
+    def api_tor_status():
+        return jsonify({
+            "enabled": storage.get_setting("tor_enabled", "true") == "true",
+            "directory_node_enabled": storage.get_setting("directory_node_enabled", "false") == "true",
+            "peers": len(storage.get_all_tor_peers()),
+            "active_peers": len(storage.get_active_tor_peers()),
+            "directory_nodes": len(storage.get_directory_nodes()),
+            "announced_peers": storage.get_announced_peers_count(),
+        })
+
+    @app.route("/api/tor/peers")
+    def api_tor_peers():
+        peers = storage.get_all_tor_peers()
+        for p in peers:
+            p["time_ago"] = _time_ago(p["last_seen"])
+        return jsonify(peers)
 
     return app
 

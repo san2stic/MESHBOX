@@ -63,6 +63,7 @@
                 Collez le JSON d'un contact pour l'ajouter à votre liste de contacts.
             </p>
             <form method="POST" action="/add-contact">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label class="form-label">JSON du contact</label>
                     <textarea name="json_data" class="form-textarea" rows="6" placeholder='{"fingerprint": "...", "name": "...", "verify_key": "...", "box_public_key": "..."}'></textarea>

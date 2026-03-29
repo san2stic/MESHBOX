@@ -127,3 +127,69 @@ function isInputFocused() {
     const el = document.activeElement;
     return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
 }
+
+// === Server-Sent Events (SSE) ===
+(function initSSE() {
+    if (typeof EventSource === 'undefined') return;
+
+    let es;
+    let retryDelay = 1000;
+    const maxRetry = 30000;
+
+    function connect() {
+        es = new EventSource('/api/events');
+
+        es.addEventListener('status', (e) => {
+            try {
+                const data = JSON.parse(e.data);
+
+                // Update peer count
+                const peerEl = document.getElementById('peerCount');
+                if (peerEl && data.total_peers_seen !== undefined) {
+                    peerEl.textContent = data.total_peers_seen;
+                }
+
+                // Update inbox badge
+                const badge = document.querySelector('.nav-badge:not(.sos-badge)');
+                if (badge && data.unread_messages !== undefined) {
+                    badge.textContent = data.unread_messages;
+                    badge.style.display = data.unread_messages > 0 ? '' : 'none';
+                }
+
+                // Update SOS badge
+                const sosBadge = document.querySelector('.nav-badge.sos-badge');
+                if (sosBadge && data.active_sos !== undefined) {
+                    sosBadge.textContent = data.active_sos;
+                    sosBadge.style.display = data.active_sos > 0 ? '' : 'none';
+                }
+            } catch (_) {}
+        });
+
+        es.addEventListener('new_message', () => {
+            showToast('📨 Nouveau message reçu', 'info');
+        });
+
+        es.addEventListener('sos_alert', (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                showToast('🚨 Alerte SOS: ' + (data.message || ''), 'error');
+            } catch (_) {
+                showToast('🚨 Nouvelle alerte SOS', 'error');
+            }
+        });
+
+        es.addEventListener('tor_peer', () => {
+            showToast('🧅 Nouveau pair Tor connecté', 'info');
+        });
+
+        es.onopen = () => { retryDelay = 1000; };
+
+        es.onerror = () => {
+            es.close();
+            setTimeout(connect, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, maxRetry);
+        };
+    }
+
+    connect();
+})();

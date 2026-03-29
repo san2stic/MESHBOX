@@ -37,6 +37,7 @@
         <div class="message-actions">
             <a href="/send?to={{ sender_fingerprint }}" class="btn btn-primary">↩ Répondre</a>
             <form method="POST" action="/delete-message/{{ message_id }}" style="display:inline">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-danger" onclick="return confirm('Supprimer ce message ?')">🗑 Supprimer</button>
             </form>
         </div>

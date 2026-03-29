@@ -27,5 +27,34 @@ DEFAULT_TTL = 604800
 # Default web UI port
 WEB_PORT = 8080
 
-# Max file size (10 MB)
-MAX_FILE_SIZE = 10 * 1024 * 1024
+# Max file size (50 MB with chunking)
+MAX_FILE_SIZE = 50 * 1024 * 1024
+
+# File chunk size for mesh relay (256 KB)
+FILE_CHUNK_SIZE = 256 * 1024
+
+# Tor configuration
+TOR_SOCKS_PORT = 9050
+TOR_CONTROL_PORT = 9051
+TOR_DATA_DIR = DATA_DIR / "tor"
+TOR_HIDDEN_SERVICE_DIR = TOR_DATA_DIR / "hidden_service"
+TOR_ENABLED_DEFAULT = True
+
+# MeshBox directory bootstrap nodes (.onion addresses)
+# These are well-known directory nodes that help with Tor peer discovery.
+# Any MeshBox node can optionally act as a directory node.
+DIRECTORY_BOOTSTRAP_NODES = [
+    # Placeholder bootstrap nodes - replace with real .onion addresses in production
+    # "meshboxdir1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion",
+    # "meshboxdir2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion",
+]
+
+# Directory announcement interval (seconds)
+DIRECTORY_ANNOUNCE_INTERVAL = 300  # 5 minutes
+
+# Peer stale timeout (seconds)
+PEER_STALE_TIMEOUT = 1800  # 30 minutes
+
+# Update configuration
+UPDATE_CHECK_INTERVAL = 86400  # 24 hours
+UPDATE_TRUSTED_KEYS = []  # Ed25519 public keys for signed releases
