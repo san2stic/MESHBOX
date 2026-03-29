@@ -139,19 +139,27 @@ install_systemd_services() {
     local unit_dir="$REAL_HOME/.config/systemd/user"
     mkdir -p "$unit_dir"
 
+    # ── Detect if debian-tor group exists (for cookie auth) ──
+    local supp_groups=""
+    if getent group debian-tor &>/dev/null; then
+        supp_groups="SupplementaryGroups=debian-tor"
+    fi
+
     # ── meshbox-daemon.service ────────────────────────────────
     cat > "$unit_dir/meshbox-daemon.service" <<EOF
 [Unit]
 Description=MeshBox Mesh Network Daemon
-After=network.target
+After=network.target tor.service
+Wants=tor.service
 
 [Service]
 Type=simple
 ExecStart=$VENV_DIR/bin/meshbox daemon --log-level INFO
 Environment=MESHBOX_DATA_DIR=$MESHBOX_DATA_DIR
 Environment=PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin
+${supp_groups}
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=default.target

@@ -48,7 +48,34 @@ class TorManager:
 
         try:
             self._controller = Controller.from_port(port=TOR_CONTROL_PORT)
-            self._controller.authenticate()
+            try:
+                self._controller.authenticate()
+            except Exception:
+                # Fallback: try explicit cookie paths (group perms may be needed)
+                cookie_paths = [
+                    "/run/tor/control.authcookie",
+                    "/var/run/tor/control.authcookie",
+                    "/var/lib/tor/control.authcookie",
+                ]
+                authenticated = False
+                for cpath in cookie_paths:
+                    if os.path.exists(cpath):
+                        try:
+                            self._controller.authenticate(cookie_path=cpath)
+                            authenticated = True
+                            logger.info("Tor authenticated via cookie: %s", cpath)
+                            break
+                        except Exception as auth_err:
+                            logger.debug("Cookie auth failed (%s): %s", cpath, auth_err)
+                if not authenticated:
+                    # Try password-less auth as last resort
+                    try:
+                        self._controller.authenticate(password="")
+                    except Exception:
+                        raise RuntimeError(
+                            "Cannot authenticate with Tor ControlPort. "
+                            "Check CookieAuthFileGroupReadable and group membership."
+                        )
 
             # Load saved key for persistent .onion address, or create new
             key_file = self.data_dir / "tor_hidden_service_key"
@@ -63,7 +90,7 @@ class TorManager:
 
             result = self._controller.create_ephemeral_hidden_service(
                 {80: f"127.0.0.1:{MESHBOX_PORT}"},
-                await_publication=True,
+                await_publication=False,
                 key_type=key_type,
                 key_content=key_content,
             )
