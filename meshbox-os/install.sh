@@ -397,46 +397,70 @@ install_tor() {
     torrc_dir="$(dirname "$TORRC")"
     mkdir -p "$torrc_dir"
 
-    # Only write config if ControlPort is not already configured
+    # Append needed directives without overwriting existing config
+    local tor_changed=false
+    if ! grep -q "^SocksPort 9050" "$TORRC" 2>/dev/null; then
+        echo "SocksPort 9050" >> "$TORRC"
+        tor_changed=true
+    fi
     if ! grep -q "^ControlPort 9051" "$TORRC" 2>/dev/null; then
-        info "Configuring Tor (ControlPort 9051)..."
-        cat > "$TORRC" <<TOREOF
-SocksPort 9050
-ControlPort 9051
-CookieAuthentication 1
-TOREOF
+        echo "ControlPort 9051" >> "$TORRC"
+        tor_changed=true
+    fi
+    if ! grep -q "^CookieAuthentication 1" "$TORRC" 2>/dev/null; then
+        echo "CookieAuthentication 1" >> "$TORRC"
+        tor_changed=true
+    fi
+    if [[ "$tor_changed" == true ]]; then
         ok "Tor configured ($TORRC)"
     else
         ok "Tor already configured with ControlPort"
     fi
 
-    # ── Start Tor service ─────────────────────────────────────
+    # ── On Linux, add user to debian-tor group for cookie auth ─
+    if [[ "$PLATFORM" == "linux" ]] && getent group debian-tor &>/dev/null; then
+        if ! id -nG "$REAL_USER" | grep -qw debian-tor; then
+            info "Adding $REAL_USER to debian-tor group (cookie auth)..."
+            sudo usermod -aG debian-tor "$REAL_USER"
+            ok "$REAL_USER added to debian-tor group"
+        fi
+    fi
+
+    # ── Start / restart Tor service ───────────────────────────
     if [[ "$PLATFORM" == "macos" ]]; then
         if ! brew services list | grep -q "tor.*started"; then
             info "Starting Tor service..."
             brew services start tor
             ok "Tor service started"
+        elif [[ "$tor_changed" == true ]]; then
+            info "Restarting Tor service (config changed)..."
+            brew services restart tor
+            ok "Tor service restarted"
         else
             ok "Tor service already running"
         fi
     else
-        if ! systemctl is-active --quiet tor 2>/dev/null; then
-            info "Starting Tor service..."
-            sudo systemctl enable tor
-            sudo systemctl start tor
-            ok "Tor service started"
+        sudo systemctl enable tor
+        if [[ "$tor_changed" == true ]] || ! systemctl is-active --quiet tor 2>/dev/null; then
+            info "Starting/restarting Tor service..."
+            sudo systemctl restart tor
+            ok "Tor service (re)started"
         else
             ok "Tor service already running"
         fi
     fi
 
     # ── Wait for Tor to be ready ──────────────────────────────
-    info "Waiting for Tor to establish circuits..."
+    # Raspberry Pi / low-power devices may need up to 45s
+    local max_wait=30
+    [[ "$PLATFORM" == "linux" ]] && max_wait=45
+    info "Waiting for Tor to establish circuits (up to ${max_wait}s)..."
     local retries=0
     while ! nc -z 127.0.0.1 9051 2>/dev/null; do
         retries=$((retries + 1))
-        if (( retries > 15 )); then
-            warn "Tor ControlPort not reachable after 15s. Daemon will retry on start."
+        if (( retries > max_wait )); then
+            warn "Tor ControlPort not reachable after ${max_wait}s."
+            warn "Check Tor status: sudo systemctl status tor / sudo journalctl -u tor"
             return 0
         fi
         sleep 1
