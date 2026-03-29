@@ -424,8 +424,26 @@ install_tor() {
     # Create torrc if it doesn't exist (shouldn't happen, but be safe)
     [[ -f "$TORRC" ]] || touch "$TORRC"
 
+    # ── Determine Tor DataDirectory ────────────────────────
+    local tor_data_dir
+    if [[ "$PLATFORM" == "macos" ]]; then
+        tor_data_dir="$REAL_HOME/.tor"
+    else
+        tor_data_dir="/var/lib/tor"
+    fi
+    mkdir -p "$tor_data_dir"
+    if [[ -n "${SUDO_UID:-}" && "$PLATFORM" == "macos" ]]; then
+        chown "$REAL_USER" "$tor_data_dir"
+    fi
+
+    local tor_cookie_file="$tor_data_dir/control_auth_cookie"
+
     # Append needed directives without overwriting existing config
     local tor_changed=false
+    if ! grep -q "^DataDirectory " "$TORRC" 2>/dev/null; then
+        echo "DataDirectory $tor_data_dir" >> "$TORRC"
+        tor_changed=true
+    fi
     if ! grep -q "^SocksPort 9050" "$TORRC" 2>/dev/null; then
         echo "SocksPort 9050" >> "$TORRC"
         tor_changed=true
@@ -436,6 +454,11 @@ install_tor() {
     fi
     if ! grep -q "^CookieAuthentication 1" "$TORRC" 2>/dev/null; then
         echo "CookieAuthentication 1" >> "$TORRC"
+        tor_changed=true
+    fi
+    # Explicit CookieAuthFile is required for CookieAuthFileGroupReadable
+    if ! grep -q "^CookieAuthFile " "$TORRC" 2>/dev/null; then
+        echo "CookieAuthFile $tor_cookie_file" >> "$TORRC"
         tor_changed=true
     fi
     # Allow group members (debian-tor) to read the cookie file
@@ -463,8 +486,27 @@ install_tor() {
 
     # ── Verify config is valid before restarting ──────────────
     info "Verifying Tor configuration..."
-    if ! sudo -u debian-tor tor --verify-config -f "$TORRC" 2>/dev/null \
-       && ! tor --verify-config -f "$TORRC" 2>/dev/null; then
+    local tor_verify_ok=false
+    if [[ "$PLATFORM" == "linux" ]]; then
+        # Try as debian-tor first (owns /var/lib/tor), then as current user
+        if sudo -u debian-tor tor --verify-config -f "$TORRC" 2>/dev/null; then
+            tor_verify_ok=true
+        fi
+    fi
+    if [[ "$tor_verify_ok" == false ]]; then
+        # On macOS or if debian-tor check failed, run as the real user
+        # (the DataDirectory is owned by REAL_USER, not root)
+        if [[ -n "${SUDO_UID:-}" ]]; then
+            if sudo -u "$REAL_USER" tor --verify-config -f "$TORRC" 2>/dev/null; then
+                tor_verify_ok=true
+            fi
+        else
+            if tor --verify-config -f "$TORRC" 2>/dev/null; then
+                tor_verify_ok=true
+            fi
+        fi
+    fi
+    if [[ "$tor_verify_ok" == false ]]; then
         warn "Tor config verification failed. Dumping torrc:"
         cat "$TORRC"
         warn "Fix the errors above and re-run install.sh"
@@ -474,13 +516,28 @@ install_tor() {
 
     # ── Start / restart Tor service ───────────────────────────
     if [[ "$PLATFORM" == "macos" ]]; then
-        if ! brew services list | grep -q "tor.*started"; then
+        # Homebrew services MUST run as the regular user, not root.
+        # Running `brew services` under sudo installs a system daemon
+        # which Tor refuses (and causes launchctl bootstrap errors).
+        local brew_cmd="brew services"
+        if [[ -n "${SUDO_UID:-}" ]]; then
+            brew_cmd="sudo -u $REAL_USER brew services"
+        fi
+
+        # Clean up any root-owned Tor service from a previous bad run
+        if [[ -f "/Library/LaunchDaemons/homebrew.mxcl.tor.plist" ]]; then
+            launchctl bootout system/homebrew.mxcl.tor 2>/dev/null || true
+            rm -f /Library/LaunchDaemons/homebrew.mxcl.tor.plist
+            info "Removed stale root-level Tor service"
+        fi
+
+        if ! $brew_cmd list | grep -q "tor.*started"; then
             info "Starting Tor service..."
-            brew services start tor
+            $brew_cmd start tor
             ok "Tor service started"
         elif [[ "$tor_changed" == true ]]; then
             info "Restarting Tor service (config changed)..."
-            brew services restart tor
+            $brew_cmd restart tor
             ok "Tor service restarted"
         else
             ok "Tor service already running"

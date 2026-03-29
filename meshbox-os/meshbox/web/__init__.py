@@ -999,12 +999,13 @@ def create_app(data_dir: Path = None) -> Flask:
 
     @app.route("/api/tor/status")
     def api_tor_status():
+        dir_enabled = storage.get_setting("directory_node_enabled", "false") == "true"
         return jsonify({
             "enabled": storage.get_setting("tor_enabled", "true") == "true",
-            "directory_node_enabled": storage.get_setting("directory_node_enabled", "false") == "true",
+            "directory_node_enabled": dir_enabled,
             "peers": len(storage.get_all_tor_peers()),
             "active_peers": len(storage.get_active_tor_peers()),
-            "directory_nodes": len(storage.get_directory_nodes()),
+            "directory_nodes": len(storage.get_directory_nodes()) + (1 if dir_enabled else 0),
             "announced_peers": storage.get_announced_peers_count(),
         })
 
