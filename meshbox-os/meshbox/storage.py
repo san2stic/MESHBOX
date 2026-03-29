@@ -259,11 +259,23 @@ class StorageEngine:
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
             """)
-            # Migration: add delivery_status column if upgrading from v3
+            # Migration: add columns if upgrading from older schema
             try:
                 conn.execute("SELECT delivery_status FROM messages LIMIT 1")
             except sqlite3.OperationalError:
                 conn.execute("ALTER TABLE messages ADD COLUMN delivery_status TEXT DEFAULT 'queued'")
+            try:
+                conn.execute("SELECT disappear_after_read FROM messages LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE messages ADD COLUMN disappear_after_read INTEGER DEFAULT 0")
+            try:
+                conn.execute("SELECT disappear_timer FROM messages LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE messages ADD COLUMN disappear_timer INTEGER DEFAULT 0")
+            try:
+                conn.execute("SELECT read_at FROM messages LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE messages ADD COLUMN read_at INTEGER DEFAULT 0")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_delivery_status ON messages(delivery_status)")
 
     # === Node Settings ===
