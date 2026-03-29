@@ -160,7 +160,7 @@ After=network.target meshbox-daemon.service
 
 [Service]
 Type=simple
-ExecStart=$VENV_DIR/bin/meshbox web --host 127.0.0.1 --port 8080
+ExecStart=$VENV_DIR/bin/meshbox web --host 0.0.0.0 --port 8080
 Environment=MESHBOX_DATA_DIR=$MESHBOX_DATA_DIR
 Environment=PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
@@ -275,7 +275,7 @@ EOF
         <string>$VENV_DIR/bin/meshbox</string>
         <string>web</string>
         <string>--host</string>
-        <string>127.0.0.1</string>
+        <string>0.0.0.0</string>
         <string>--port</string>
         <string>8080</string>
     </array>
@@ -456,7 +456,7 @@ echo -e "${GREEN}  MeshBox installation complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
 echo ""
 echo "  Daemon ➜  running in background (mesh networking)"
-echo "  Web UI ➜  http://127.0.0.1:8080"
+echo "  Web UI ➜  http://0.0.0.0:8080  (accessible on local network)"
 echo "  Data   ➜  $MESHBOX_DATA_DIR"
 echo "  Venv   ➜  $VENV_DIR"
 echo ""
