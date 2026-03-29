@@ -384,6 +384,22 @@ install_tor() {
         ok "Tor already installed ($(tor --version | head -1))"
     fi
 
+    # ── Helper: check if a port is open ───────────────────────
+    # nc may not be installed on minimal Raspberry Pi OS images
+    check_port() {
+        local host="$1" port="$2"
+        if command -v nc &>/dev/null; then
+            nc -z "$host" "$port" 2>/dev/null
+        elif command -v ss &>/dev/null; then
+            ss -tlnH "sport = :$port" 2>/dev/null | grep -q LISTEN
+        elif [[ -e /dev/tcp/$host/$port ]]; then
+            (echo >/dev/tcp/"$host"/"$port") 2>/dev/null
+        else
+            # last resort: try bash built-in /dev/tcp
+            bash -c "(echo >/dev/tcp/$host/$port) 2>/dev/null"
+        fi
+    }
+
     # ── Configure Tor with ControlPort ────────────────────────
     if [[ "$PLATFORM" == "macos" ]]; then
         TORRC="/opt/homebrew/etc/tor/torrc"
@@ -396,6 +412,9 @@ install_tor() {
     local torrc_dir
     torrc_dir="$(dirname "$TORRC")"
     mkdir -p "$torrc_dir"
+
+    # Create torrc if it doesn't exist (shouldn't happen, but be safe)
+    [[ -f "$TORRC" ]] || touch "$TORRC"
 
     # Append needed directives without overwriting existing config
     local tor_changed=false
@@ -424,7 +443,21 @@ install_tor() {
             sudo usermod -aG debian-tor "$REAL_USER"
             ok "$REAL_USER added to debian-tor group"
         fi
+        # Ensure the cookie file is group-readable
+        local cookie="/run/tor/control.authcookie"
+        [[ -f "$cookie" ]] && sudo chmod g+r "$cookie" 2>/dev/null || true
     fi
+
+    # ── Verify config is valid before restarting ──────────────
+    info "Verifying Tor configuration..."
+    if ! sudo -u debian-tor tor --verify-config -f "$TORRC" 2>/dev/null \
+       && ! tor --verify-config -f "$TORRC" 2>/dev/null; then
+        warn "Tor config verification failed. Dumping torrc:"
+        cat "$TORRC"
+        warn "Fix the errors above and re-run install.sh"
+        return 1
+    fi
+    ok "Tor configuration valid"
 
     # ── Start / restart Tor service ───────────────────────────
     if [[ "$PLATFORM" == "macos" ]]; then
@@ -441,26 +474,38 @@ install_tor() {
         fi
     else
         sudo systemctl enable tor
-        if [[ "$tor_changed" == true ]] || ! systemctl is-active --quiet tor 2>/dev/null; then
-            info "Starting/restarting Tor service..."
-            sudo systemctl restart tor
-            ok "Tor service (re)started"
-        else
-            ok "Tor service already running"
+        info "Restarting Tor service..."
+        sudo systemctl restart tor
+        sleep 2
+
+        # ── Check if Tor actually started ─────────────────────
+        if ! systemctl is-active --quiet tor 2>/dev/null; then
+            warn "Tor failed to start. Service status:"
+            sudo systemctl status tor --no-pager -l 2>&1 | tail -20
+            echo ""
+            warn "Last Tor log entries:"
+            sudo journalctl -u tor --no-pager -n 15 2>&1 || true
+            return 1
         fi
+        ok "Tor service running"
     fi
 
-    # ── Wait for Tor to be ready ──────────────────────────────
-    # Raspberry Pi / low-power devices may need up to 45s
-    local max_wait=30
-    [[ "$PLATFORM" == "linux" ]] && max_wait=45
-    info "Waiting for Tor to establish circuits (up to ${max_wait}s)..."
+    # ── Wait for Tor ControlPort to be ready ──────────────────
+    local max_wait=60
+    info "Waiting for Tor ControlPort (up to ${max_wait}s)..."
     local retries=0
-    while ! nc -z 127.0.0.1 9051 2>/dev/null; do
+    while ! check_port 127.0.0.1 9051; do
         retries=$((retries + 1))
         if (( retries > max_wait )); then
             warn "Tor ControlPort not reachable after ${max_wait}s."
-            warn "Check Tor status: sudo systemctl status tor / sudo journalctl -u tor"
+            if [[ "$PLATFORM" == "linux" ]]; then
+                warn "Tor service status:"
+                sudo systemctl status tor --no-pager -l 2>&1 | tail -10
+                echo ""
+                warn "Recent Tor logs:"
+                sudo journalctl -u tor --no-pager -n 20 2>&1 || true
+            fi
+            warn "MeshBox daemon will retry Tor connection on start."
             return 0
         fi
         sleep 1
