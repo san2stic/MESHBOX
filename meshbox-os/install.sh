@@ -430,6 +430,11 @@ install_tor() {
         echo "CookieAuthentication 1" >> "$TORRC"
         tor_changed=true
     fi
+    # Allow group members (debian-tor) to read the cookie file
+    if ! grep -q "^CookieAuthFileGroupReadable 1" "$TORRC" 2>/dev/null; then
+        echo "CookieAuthFileGroupReadable 1" >> "$TORRC"
+        tor_changed=true
+    fi
     if [[ "$tor_changed" == true ]]; then
         ok "Tor configured ($TORRC)"
     else

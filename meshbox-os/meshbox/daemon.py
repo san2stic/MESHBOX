@@ -121,25 +121,46 @@ class MeshBoxDaemon:
         self.storage.close()
 
     async def _start_tor(self):
-        """Initialize Tor hidden service and directory client."""
+        """Initialize Tor hidden service and directory client with retries."""
         try:
             from meshbox.tor import TorManager
             from meshbox.directory import DirectoryClient
+        except ImportError:
+            logging.info("Tor modules not available (install stem + PySocks)")
+            return
 
-            self.tor_manager = TorManager(self.data_dir)
-            started = await self.tor_manager.start()
-            if not started:
-                logging.warning("Tor failed to start - internet P2P disabled")
+        max_retries = 5
+        retry_delay = 10  # seconds between attempts
+
+        for attempt in range(1, max_retries + 1):
+            if not self._running:
                 return
+            try:
+                self.tor_manager = TorManager(self.data_dir)
+                started = await self.tor_manager.start()
+                if started:
+                    break
+                logging.warning("Tor attempt %d/%d failed - retrying in %ds...",
+                                attempt, max_retries, retry_delay)
+            except Exception as e:
+                logging.warning("Tor attempt %d/%d error: %s - retrying in %ds...",
+                                attempt, max_retries, e, retry_delay)
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+        else:
+            logging.error("Tor failed after %d attempts - internet P2P disabled", max_retries)
+            return
 
-            onion = self.tor_manager.onion_address
-            logging.info("Tor hidden service: %s", onion)
+        onion = self.tor_manager.onion_address
+        logging.info("Tor hidden service: %s", onion)
 
-            # Register with network manager
-            if self.network:
-                self.network.set_tor_transport(self.tor_manager)
+        # Register with network manager
+        if self.network:
+            self.network.set_tor_transport(self.tor_manager)
 
-            # Start directory client for peer discovery
+        # Start directory client for peer discovery
+        try:
             profile = self.profile_mgr.export_profile_for_sharing()
             self.directory_client = DirectoryClient(
                 self.storage, self.tor_manager, profile
@@ -158,11 +179,8 @@ class MeshBoxDaemon:
                 self.network.transport.on_peer_gossip = self.directory_client.handle_gossip
 
             await self.directory_client.start()
-
-        except ImportError:
-            logging.info("Tor modules not available (install stem + PySocks)")
         except Exception as e:
-            logging.error("Tor initialization failed: %s", e)
+            logging.error("Directory client failed: %s", e)
 
     async def _on_delivery_receipt(self, receipt: dict):
         """Handle incoming delivery receipts."""
