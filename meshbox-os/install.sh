@@ -117,6 +117,7 @@ ok "meshbox installed ($(meshbox --version 2>&1 || echo 'v?'))"
 # ── Determine paths for services ──────────────────────────────
 MESHBOX_BIN="$(command -v meshbox)"
 MESHBOX_DATA_DIR="${MESHBOX_DATA_DIR:-$REAL_HOME/.meshbox}"
+export MESHBOX_DATA_DIR
 mkdir -p "$MESHBOX_DATA_DIR"
 
 info "meshbox binary : $MESHBOX_BIN"
