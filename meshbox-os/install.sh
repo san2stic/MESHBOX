@@ -120,6 +120,12 @@ MESHBOX_DATA_DIR="${MESHBOX_DATA_DIR:-$REAL_HOME/.meshbox}"
 export MESHBOX_DATA_DIR
 mkdir -p "$MESHBOX_DATA_DIR"
 
+# ── Fix ownership if running under sudo ───────────────────────
+if [[ -n "${SUDO_UID:-}" ]]; then
+    chown -R "$REAL_USER" "$MESHBOX_DATA_DIR"
+    chown -R "$REAL_USER" "$VENV_DIR"
+fi
+
 info "meshbox binary : $MESHBOX_BIN"
 info "Data directory : $MESHBOX_DATA_DIR"
 
