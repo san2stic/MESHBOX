@@ -58,3 +58,35 @@ PEER_STALE_TIMEOUT = 1800  # 30 minutes
 # Update configuration
 UPDATE_CHECK_INTERVAL = 86400  # 24 hours
 UPDATE_TRUSTED_KEYS = []  # Ed25519 public keys for signed releases
+
+# --- v4.1 Network enhancements ---
+
+# mDNS / Zeroconf service type for mesh peer discovery
+MDNS_SERVICE_TYPE = "_meshbox._tcp.local."
+
+# Multicast group for discovery (link-local, routers won't forward)
+MULTICAST_GROUP = "239.77.66.88"
+
+# WiFi discovery announce interval (seconds)
+DISCOVERY_ANNOUNCE_INTERVAL = 5
+
+# TCP connection pool: max idle connections per peer
+CONNECTION_POOL_MAX_IDLE = 4
+CONNECTION_POOL_IDLE_TIMEOUT = 120  # seconds
+
+# Gossip interval (seconds): how often we share peer lists with neighbors
+GOSSIP_INTERVAL = 180  # 3 minutes
+
+# Message priority levels (lower = higher priority)
+PRIORITY_SOS = 0
+PRIORITY_RECEIPT = 1
+PRIORITY_DIRECT = 2
+PRIORITY_CHANNEL = 3
+PRIORITY_FILE = 4
+PRIORITY_RELAY = 5
+
+# Inventory sync: use compact hashes instead of full relay dumps
+SYNC_INVENTORY_HASH_LEN = 12  # bytes of message_id hash in inventory bloom
+
+# Network stats persistence interval (seconds)
+NETWORK_STATS_SAVE_INTERVAL = 300

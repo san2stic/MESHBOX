@@ -103,10 +103,11 @@ class TorManager:
             self._controller = None
 
     async def send_to_onion(self, fingerprint_or_onion: str,
-                             command: str, payload: dict) -> Optional[dict]:
+                             command: str, payload: dict,
+                             storage=None) -> Optional[dict]:
         """
         Send a message to a .onion address via Tor SOCKS5 proxy.
-        Can accept either a fingerprint (looks up in DB) or direct .onion address.
+        Can accept either a fingerprint (looks up in storage DB) or direct .onion address.
         """
         try:
             import socks
@@ -116,10 +117,21 @@ class TorManager:
 
         onion_addr = fingerprint_or_onion
         if not fingerprint_or_onion.endswith(".onion"):
-            # Look up from storage (caller should provide .onion or store mapping)
-            logger.debug("Cannot resolve fingerprint %s to onion (not implemented here)",
-                        fingerprint_or_onion)
-            return None
+            # Look up from storage (tor_peers table)
+            if storage:
+                tor_peer = storage.get_tor_peer(fingerprint_or_onion)
+                if tor_peer and tor_peer.get("onion_address"):
+                    onion_addr = tor_peer["onion_address"]
+                    logger.debug("Resolved fingerprint %s → %s",
+                                fingerprint_or_onion[:8], onion_addr[:16])
+                else:
+                    logger.debug("Cannot resolve fingerprint %s to onion address",
+                                fingerprint_or_onion[:8])
+                    return None
+            else:
+                logger.debug("Cannot resolve fingerprint %s (no storage provided)",
+                            fingerprint_or_onion[:8])
+                return None
 
         try:
             # Connect via Tor SOCKS5 proxy

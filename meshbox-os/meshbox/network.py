@@ -1,18 +1,21 @@
 """
-MeshBox - Network manager v4.
+MeshBox - Network manager v4.1.
 Peer discovery and communication via WiFi, Bluetooth LE, and Tor.
 Features:
-- WiFi UDP broadcast discovery
+- WiFi UDP broadcast + multicast discovery
+- mDNS/Zeroconf service discovery (reliable LAN peer finding)
 - Bluetooth LE scanning
 - Tor hidden service transport (internet-based P2P)
-- TCP message transport with framing
+- TCP message transport with framing and connection pooling
 - Onion routing for multi-hop sender privacy
 - Message deduplication (seen set)
 - Hop-limited epidemic routing
+- Signed discovery packets (anti-spoofing)
 - Rate limiting & connection throttling
 - Connection retry with exponential backoff
 - Delivery receipts
 - Bandwidth throttling
+- Message priority routing (SOS > receipts > direct > relay)
 """
 
 import asyncio
@@ -29,9 +32,23 @@ from typing import Callable, Optional
 
 import nacl.encoding
 import nacl.public
+import nacl.signing
 import nacl.utils
 
-from meshbox.config import PEER_STALE_TIMEOUT
+from meshbox.config import (
+    PEER_STALE_TIMEOUT,
+    MULTICAST_GROUP,
+    MDNS_SERVICE_TYPE,
+    CONNECTION_POOL_MAX_IDLE,
+    CONNECTION_POOL_IDLE_TIMEOUT,
+    DISCOVERY_ANNOUNCE_INTERVAL,
+    PRIORITY_SOS,
+    PRIORITY_RECEIPT,
+    PRIORITY_DIRECT,
+    PRIORITY_CHANNEL,
+    PRIORITY_FILE,
+    PRIORITY_RELAY,
+)
 
 logger = logging.getLogger("meshbox.network")
 
@@ -238,26 +255,36 @@ class PeerInfo:
 
 
 class WiFiDiscovery:
-    """Peer discovery via WiFi (UDP broadcast)."""
+    """Peer discovery via WiFi (UDP broadcast + multicast + signed packets)."""
 
-    def __init__(self, profile_data: dict, port: int = MESHBOX_DISCOVERY_PORT):
+    def __init__(self, profile_data: dict, port: int = MESHBOX_DISCOVERY_PORT,
+                 signing_key=None):
         self.profile_data = profile_data
         self.port = port
         self.peers: dict[str, PeerInfo] = {}
         self.on_peer_discovered: Optional[Callable] = None
         self._running = False
+        self._signing_key = signing_key  # nacl.signing.SigningKey for signed announces
 
     def _build_announce_packet(self) -> bytes:
-        payload = json.dumps({
+        inner = {
             "fingerprint": self.profile_data["fingerprint"],
             "name": self.profile_data["name"],
             "verify_key": self.profile_data["verify_key"],
             "box_public_key": self.profile_data["box_public_key"],
             "port": MESHBOX_PORT,
             "version": PROTOCOL_VERSION,
-            "capabilities": ["pfs", "onion", "channels", "files", "tor", "receipts"],
-        }).encode("utf-8")
+            "capabilities": ["pfs", "onion", "channels", "files", "tor", "receipts", "mdns", "multicast"],
+            "timestamp": int(time.time()),
+        }
 
+        # Sign the announce payload for authentication
+        if self._signing_key:
+            inner_bytes = json.dumps(inner, sort_keys=True).encode("utf-8")
+            sig = self._signing_key.sign(inner_bytes).signature
+            inner["signature"] = nacl.encoding.Base64Encoder.encode(sig).decode()
+
+        payload = json.dumps(inner).encode("utf-8")
         header = MESHBOX_MAGIC + struct.pack("!BI", PROTOCOL_VERSION, len(payload))
         return header + payload
 
@@ -270,7 +297,7 @@ class WiFiDiscovery:
             return None
 
         payload_len = struct.unpack("!I", data[5:9])[0]
-        if payload_len > 4096:  # Limit discovery packet size
+        if payload_len > 8192:  # Limit discovery packet size
             return None
         if len(data) < 9 + payload_len:
             return None
@@ -283,6 +310,26 @@ class WiFiDiscovery:
         if payload.get("fingerprint") == self.profile_data.get("fingerprint"):
             return None
 
+        # Reject announce packets older than 5 minutes (anti-replay)
+        announce_ts = payload.get("timestamp", 0)
+        if abs(time.time() - announce_ts) > 300:
+            logger.debug("Stale announce packet from %s (ts=%d)", addr, announce_ts)
+            return None
+
+        # Verify signature if present
+        sig_b64 = payload.pop("signature", None)
+        if sig_b64 and payload.get("verify_key"):
+            try:
+                vk = nacl.signing.VerifyKey(
+                    payload["verify_key"].encode(), nacl.encoding.Base64Encoder
+                )
+                sig = nacl.encoding.Base64Encoder.decode(sig_b64.encode())
+                inner_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+                vk.verify(inner_bytes, sig)
+            except Exception:
+                logger.warning("Invalid signature in announce from %s — dropped", addr)
+                return None
+
         return PeerInfo(
             fingerprint=payload["fingerprint"],
             address=addr,
@@ -291,51 +338,101 @@ class WiFiDiscovery:
             profile_data=payload,
         )
 
-    async def start_announcer(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.setblocking(False)
+    def _get_local_ips(self) -> list[str]:
+        """Return list of local IPv4 addresses (for subnet broadcast calculation)."""
+        ips = []
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127."):
+                    ips.append(ip)
+        except Exception:
+            pass
+        if not ips:
+            # Fallback: connect to a non-routable address to find local IP
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("10.255.255.255", 1))
+                ips.append(s.getsockname()[0])
+                s.close()
+            except Exception:
+                pass
+        return ips
 
-        packet = self._build_announce_packet()
+    async def start_announcer(self):
+        # Broadcast socket
+        bcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        bcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        bcast_sock.setblocking(False)
+
+        # Multicast socket
+        mcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        mcast_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        mcast_sock.setblocking(False)
+
         self._running = True
-        logger.info("WiFi Discovery: broadcasting on port %d", self.port)
+        logger.info("WiFi Discovery: broadcasting + multicast on port %d", self.port)
 
         while self._running:
+            packet = self._build_announce_packet()
+            # Broadcast to 255.255.255.255
             try:
-                sock.sendto(packet, ("255.255.255.255", self.port))
+                bcast_sock.sendto(packet, ("255.255.255.255", self.port))
             except OSError as e:
                 logger.debug("Broadcast error: %s", e)
 
-            await asyncio.sleep(5)
+            # Multicast to group
+            try:
+                mcast_sock.sendto(packet, (MULTICAST_GROUP, self.port))
+            except OSError as e:
+                logger.debug("Multicast error: %s", e)
 
-        sock.close()
+            await asyncio.sleep(DISCOVERY_ANNOUNCE_INTERVAL)
+
+        bcast_sock.close()
+        mcast_sock.close()
 
     async def start_listener(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "darwin":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         try:
             sock.bind(("", self.port))
         except OSError as e:
             logger.warning("Cannot bind discovery port %d: %s", self.port, e)
             return
-        sock.setblocking(False)
 
+        # Join multicast group on all interfaces
+        mreq = struct.pack("4s4s",
+                           socket.inet_aton(MULTICAST_GROUP),
+                           socket.inet_aton("0.0.0.0"))
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            logger.info("Joined multicast group %s", MULTICAST_GROUP)
+        except OSError as e:
+            logger.debug("Multicast join failed (broadcast-only): %s", e)
+
+        sock.setblocking(False)
         self._running = True
-        logger.info("WiFi Discovery: listening on port %d", self.port)
+        logger.info("WiFi Discovery: listening on port %d (broadcast + multicast)", self.port)
 
         loop = asyncio.get_event_loop()
         while self._running:
             try:
                 data, addr = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: sock.recvfrom(4096)),
+                    loop.run_in_executor(None, lambda: sock.recvfrom(8192)),
                     timeout=1.0
                 )
                 peer = self._parse_announce_packet(data, addr[0])
                 if peer:
+                    is_new = peer.fingerprint not in self.peers
                     self.peers[peer.fingerprint] = peer
                     if self.on_peer_discovered:
                         await self.on_peer_discovered(peer)
-                    logger.debug("Peer discovered: %s", peer)
+                    if is_new:
+                        logger.info("Peer discovered via WiFi: %s (%s)",
+                                    peer.profile_data.get("name", "?"), peer.fingerprint[:8])
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -348,8 +445,165 @@ class WiFiDiscovery:
         self._running = False
 
 
+class ZeroconfDiscovery:
+    """Peer discovery via mDNS/Zeroconf — most reliable LAN discovery method."""
+
+    def __init__(self, profile_data: dict, port: int = MESHBOX_PORT):
+        self.profile_data = profile_data
+        self.port = port
+        self.peers: dict[str, PeerInfo] = {}
+        self.on_peer_discovered: Optional[Callable] = None
+        self._zeroconf = None
+        self._browser = None
+        self._service_info = None
+        self._running = False
+
+    async def start(self):
+        """Register our service and browse for peers via mDNS."""
+        try:
+            from zeroconf import Zeroconf, ServiceBrowser, ServiceInfo
+            import socket as _socket
+        except ImportError:
+            logger.info("Zeroconf not installed — mDNS discovery disabled (pip install zeroconf)")
+            return
+
+        self._running = True
+
+        try:
+            self._zeroconf = Zeroconf()
+
+            # Build properties for our service advertisement
+            props = {
+                b"fp": self.profile_data["fingerprint"].encode(),
+                b"name": self.profile_data["name"].encode(),
+                b"vk": self.profile_data["verify_key"][:32].encode(),
+                b"bpk": self.profile_data["box_public_key"][:32].encode(),
+                b"ver": str(PROTOCOL_VERSION).encode(),
+            }
+
+            # Determine local IP for advertisement
+            local_ip = "0.0.0.0"
+            try:
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                s.connect(("10.255.255.255", 1))
+                local_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                pass
+
+            service_name = f"meshbox-{self.profile_data['fingerprint'][:8]}.{MDNS_SERVICE_TYPE}"
+            self._service_info = ServiceInfo(
+                MDNS_SERVICE_TYPE,
+                service_name,
+                addresses=[_socket.inet_aton(local_ip)],
+                port=self.port,
+                properties=props,
+            )
+
+            self._zeroconf.register_service(self._service_info)
+            logger.info("mDNS: registered service %s on %s:%d", service_name, local_ip, self.port)
+
+            # Browse for other MeshBox services
+            self._browser = ServiceBrowser(
+                self._zeroconf, MDNS_SERVICE_TYPE, handlers=[self._on_service_state_change]
+            )
+            logger.info("mDNS: browsing for peers on %s", MDNS_SERVICE_TYPE)
+
+            # Keep running until stopped
+            while self._running:
+                await asyncio.sleep(2)
+
+        except Exception as e:
+            logger.warning("mDNS discovery error: %s", e)
+        finally:
+            self._cleanup()
+
+    def _on_service_state_change(self, zeroconf, service_type, name, state_change):
+        """Callback when a mDNS service is found or removed."""
+        try:
+            from zeroconf import ServiceStateChange
+        except ImportError:
+            return
+
+        if state_change == ServiceStateChange.Added:
+            info = zeroconf.get_service_info(service_type, name)
+            if info:
+                self._process_service(info)
+        elif state_change == ServiceStateChange.Removed:
+            # Extract fingerprint from service name
+            if name.startswith("meshbox-"):
+                fp_prefix = name.split(".")[0].replace("meshbox-", "")
+                stale = [fp for fp in self.peers if fp.startswith(fp_prefix)]
+                for fp in stale:
+                    del self.peers[fp]
+                    logger.debug("mDNS: peer removed %s", fp[:8])
+
+    def _process_service(self, info):
+        """Process a discovered mDNS service into a PeerInfo."""
+        props = info.properties or {}
+        fp = props.get(b"fp", b"").decode()
+        name = props.get(b"name", b"Unknown").decode()
+        vk = props.get(b"vk", b"").decode()
+        bpk = props.get(b"bpk", b"").decode()
+
+        if not fp or fp == self.profile_data.get("fingerprint"):
+            return
+
+        # Get IP addresses
+        addresses = info.parsed_addresses()
+        if not addresses:
+            return
+
+        addr = addresses[0]
+        port = info.port or MESHBOX_PORT
+
+        peer = PeerInfo(
+            fingerprint=fp,
+            address=addr,
+            port=port,
+            connection_type="mdns",
+            profile_data={
+                "fingerprint": fp,
+                "name": name,
+                "verify_key": vk,
+                "box_public_key": bpk,
+            },
+        )
+
+        is_new = fp not in self.peers
+        self.peers[fp] = peer
+
+        if is_new:
+            logger.info("mDNS peer discovered: %s (%s) at %s:%d", name, fp[:8], addr, port)
+            if self.on_peer_discovered:
+                # Schedule the async callback
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.call_soon_threadsafe(
+                            asyncio.ensure_future,
+                            self.on_peer_discovered(peer)
+                        )
+                except Exception as e:
+                    logger.debug("mDNS callback scheduling error: %s", e)
+
+    def _cleanup(self):
+        if self._zeroconf:
+            try:
+                if self._service_info:
+                    self._zeroconf.unregister_service(self._service_info)
+                self._zeroconf.close()
+            except Exception:
+                pass
+            self._zeroconf = None
+
+    def stop(self):
+        self._running = False
+        self._cleanup()
+
+
 class MessageTransport:
-    """TCP transport for message exchange between peers with rate limiting."""
+    """TCP transport for message exchange between peers with rate limiting and connection pooling."""
 
     def __init__(self, local_fingerprint: str, port: int = MESHBOX_PORT):
         self.local_fingerprint = local_fingerprint
@@ -366,6 +620,13 @@ class MessageTransport:
         self.deduplicator = MessageDeduplicator()
         self._bytes_sent = 0
         self._bytes_received = 0
+        self._messages_sent = 0
+        self._messages_received = 0
+        # Connection pool: peer_key -> [(reader, writer, last_used)]
+        self._conn_pool: dict[str, list[tuple]] = defaultdict(list)
+        self._pool_lock = asyncio.Lock() if asyncio is not None else None
+        # Priority send queue
+        self._send_queue: asyncio.PriorityQueue = None
 
     async def start_server(self):
         try:
@@ -542,13 +803,14 @@ class MessageTransport:
 
     async def send_to_peer(self, peer: PeerInfo, command: str,
                            payload: dict, retries: int = MAX_SEND_RETRIES) -> Optional[dict]:
-        """Send a command to a peer with exponential backoff retry."""
+        """Send a command to a peer with exponential backoff retry and connection pooling."""
         last_error = None
         for attempt in range(retries):
             try:
                 result = await self._send_once(peer, command, payload)
                 if result is not None:
                     peer.update_trust(True)
+                    self._messages_sent += 1
                     return result
             except Exception as e:
                 last_error = e
@@ -563,12 +825,64 @@ class MessageTransport:
         peer.update_trust(False)
         return None
 
-    async def _send_once(self, peer: PeerInfo, command: str, payload: dict) -> Optional[dict]:
-        """Send a single request to a peer."""
+    async def _get_pooled_connection(self, addr: str, port: int):
+        """Get a connection from the pool or create a new one."""
+        pool_key = f"{addr}:{port}"
+        now = time.time()
+
+        if self._pool_lock is None:
+            self._pool_lock = asyncio.Lock()
+
+        async with self._pool_lock:
+            # Try to find a valid pooled connection
+            pool = self._conn_pool.get(pool_key, [])
+            while pool:
+                reader, writer, last_used = pool.pop(0)
+                if now - last_used > CONNECTION_POOL_IDLE_TIMEOUT:
+                    # Connection too old, close it
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                    continue
+                # Check if connection is still alive
+                try:
+                    if not writer.is_closing():
+                        return reader, writer, True  # pooled=True
+                except Exception:
+                    pass
+
+        # No pooled connection, create new
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(peer.address, peer.port),
+            asyncio.open_connection(addr, port),
             timeout=10
         )
+        return reader, writer, False
+
+    async def _return_to_pool(self, addr: str, port: int,
+                               reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Return a connection to the pool for reuse."""
+        pool_key = f"{addr}:{port}"
+
+        if self._pool_lock is None:
+            self._pool_lock = asyncio.Lock()
+
+        async with self._pool_lock:
+            pool = self._conn_pool[pool_key]
+            if len(pool) >= CONNECTION_POOL_MAX_IDLE:
+                # Pool full, close oldest
+                old_r, old_w, _ = pool.pop(0)
+                try:
+                    old_w.close()
+                    await old_w.wait_closed()
+                except Exception:
+                    pass
+            pool.append((reader, writer, time.time()))
+
+    async def _send_once(self, peer: PeerInfo, command: str, payload: dict) -> Optional[dict]:
+        """Send a single request to a peer, using connection pooling."""
+        reader, writer, pooled = await self._get_pooled_connection(peer.address, peer.port)
         try:
             request = {"command": command, **payload}
             data = json.dumps(request).encode("utf-8")
@@ -589,14 +903,31 @@ class MessageTransport:
 
             resp_data = await asyncio.wait_for(reader.readexactly(resp_len), timeout=30)
             self._bytes_received += 9 + resp_len
+            self._messages_received += 1
+
+            # Return connection to pool for reuse (only for small payloads — large ones may desync)
+            if len(data) < 1024 * 1024:
+                await self._return_to_pool(peer.address, peer.port, reader, writer)
+            else:
+                writer.close()
+                await writer.wait_closed()
 
             return json.loads(resp_data)
-        finally:
-            writer.close()
-            await writer.wait_closed()
+        except Exception:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+            raise
 
     def get_bandwidth_stats(self) -> dict:
-        return {"bytes_sent": self._bytes_sent, "bytes_received": self._bytes_received}
+        return {
+            "bytes_sent": self._bytes_sent,
+            "bytes_received": self._bytes_received,
+            "messages_sent": self._messages_sent,
+            "messages_received": self._messages_received,
+        }
 
 
 class BluetoothDiscovery:
@@ -678,12 +1009,13 @@ class BluetoothDiscovery:
 
 
 class NetworkManager:
-    """Main network manager - coordinates WiFi, Bluetooth and Tor transport."""
+    """Main network manager - coordinates WiFi, Bluetooth, mDNS and Tor transport."""
 
-    def __init__(self, profile_data: dict):
+    def __init__(self, profile_data: dict, signing_key=None):
         self.profile_data = profile_data
-        self.wifi_discovery = WiFiDiscovery(profile_data)
+        self.wifi_discovery = WiFiDiscovery(profile_data, signing_key=signing_key)
         self.bt_discovery = BluetoothDiscovery(profile_data)
+        self.mdns_discovery = ZeroconfDiscovery(profile_data)
         self.transport = MessageTransport(profile_data["fingerprint"])
         self.all_peers: dict[str, PeerInfo] = {}
         self.on_peer_discovered: Optional[Callable] = None
@@ -698,6 +1030,24 @@ class NetworkManager:
             await self.on_peer_discovered(peer)
 
     async def _on_bt_peer(self, peer: PeerInfo):
+        is_new = peer.fingerprint not in self.all_peers
+        self.all_peers[peer.fingerprint] = peer
+        if is_new and self.on_peer_discovered:
+            await self.on_peer_discovered(peer)
+
+    async def _on_mdns_peer(self, peer: PeerInfo):
+        is_new = peer.fingerprint not in self.all_peers
+        # mDNS discovery gives us verified addresses — prefer them over broadcast
+        existing = self.all_peers.get(peer.fingerprint)
+        if existing and existing.connection_type == "wifi":
+            # Update address from mDNS (more reliable)
+            existing.address = peer.address
+            existing.port = peer.port
+            existing.last_seen = time.time()
+        else:
+            self.all_peers[peer.fingerprint] = peer
+        if is_new and self.on_peer_discovered:
+            await self.on_peer_discovered(peer)
         is_new = peer.fingerprint not in self.all_peers
         self.all_peers[peer.fingerprint] = peer
         if is_new and self.on_peer_discovered:
@@ -719,6 +1069,7 @@ class NetworkManager:
     async def start(self):
         self.wifi_discovery.on_peer_discovered = self._on_wifi_peer
         self.bt_discovery.on_peer_discovered = self._on_bt_peer
+        self.mdns_discovery.on_peer_discovered = self._on_mdns_peer
 
         if self.on_message_received:
             self.transport.on_message_received = self.on_message_received
@@ -728,10 +1079,12 @@ class NetworkManager:
         tasks = [
             asyncio.create_task(self.wifi_discovery.start_announcer()),
             asyncio.create_task(self.wifi_discovery.start_listener()),
+            asyncio.create_task(self.mdns_discovery.start()),
             asyncio.create_task(self.bt_discovery.start_advertising()),
             asyncio.create_task(self.bt_discovery.start_scanner()),
             asyncio.create_task(self.transport.start_server()),
             asyncio.create_task(self._peer_cleanup_loop()),
+            asyncio.create_task(self._pool_cleanup_loop()),
         ]
 
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -753,26 +1106,60 @@ class NetworkManager:
             self.transport.connection_limiter.cleanup()
             self.transport.message_limiter.cleanup()
 
+    async def _pool_cleanup_loop(self):
+        """Periodically clean up idle connections in the pool."""
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            if self.transport._pool_lock is None:
+                self.transport._pool_lock = asyncio.Lock()
+            async with self.transport._pool_lock:
+                for key in list(self.transport._conn_pool.keys()):
+                    pool = self.transport._conn_pool[key]
+                    fresh = []
+                    for reader, writer, last_used in pool:
+                        if now - last_used > CONNECTION_POOL_IDLE_TIMEOUT:
+                            try:
+                                writer.close()
+                                await writer.wait_closed()
+                            except Exception:
+                                pass
+                        else:
+                            fresh.append((reader, writer, last_used))
+                    if fresh:
+                        self.transport._conn_pool[key] = fresh
+                    else:
+                        del self.transport._conn_pool[key]
+
     def stop(self):
         self.wifi_discovery.stop()
         self.bt_discovery.stop()
+        self.mdns_discovery.stop()
 
     async def send_to_peer_or_tor(self, fingerprint: str, command: str,
-                                   payload: dict) -> Optional[dict]:
+                                   payload: dict, storage=None) -> Optional[dict]:
         """Try to send via local mesh first, fall back to Tor if available."""
-        # Try local mesh peer
+        # Try local mesh peer (WiFi / mDNS)
         peer = self.get_peer(fingerprint)
         if peer:
             result = await self.transport.send_to_peer(peer, command, payload)
             if result:
                 return result
 
-        # Fall back to Tor transport
+        # Fall back to Tor transport with fingerprint resolution
         if self._tor_transport:
             try:
-                return await self._tor_transport.send_to_onion(fingerprint, command, payload)
+                # Try direct onion if fingerprint is an onion address
+                if fingerprint.endswith(".onion"):
+                    return await self._tor_transport.send_to_onion(
+                        fingerprint, command, payload, storage=storage
+                    )
+                # Otherwise resolve fingerprint → onion via storage
+                return await self._tor_transport.send_to_onion(
+                    fingerprint, command, payload, storage=storage
+                )
             except Exception as e:
-                logger.debug("Tor send to %s failed: %s", fingerprint, e)
+                logger.debug("Tor send to %s failed: %s", fingerprint[:8], e)
 
         return None
 

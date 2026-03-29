@@ -538,6 +538,24 @@ class StorageEngine:
         ).fetchone()
         return row is not None
 
+    def get_relay_inventory_hashes(self) -> set:
+        """Return a set of compact message_id hashes for efficient sync negotiation."""
+        conn = self._get_conn()
+        now = int(time.time())
+        rows = conn.execute("""
+            SELECT message_id FROM relay_messages
+            WHERE (timestamp + ttl) > ?
+        """, (now,)).fetchall()
+        return {hashlib.sha256(r["message_id"].encode()).hexdigest()[:24] for r in rows}
+
+    def get_seen_message_hashes(self, since: int = 0) -> set:
+        """Return compact hashes of seen message IDs for dedup negotiation."""
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT message_id FROM seen_messages WHERE first_seen > ?
+        """, (since,)).fetchall()
+        return {hashlib.sha256(r["message_id"].encode()).hexdigest()[:24] for r in rows}
+
     def mark_message_seen(self, message_id: str):
         with self._transaction() as conn:
             conn.execute(

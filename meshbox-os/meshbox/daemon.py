@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from meshbox.config import DATA_DIR, TOR_ENABLED_DEFAULT
+from meshbox.config import DATA_DIR, TOR_ENABLED_DEFAULT, GOSSIP_INTERVAL, NETWORK_STATS_SAVE_INTERVAL
 from meshbox.crypto import Identity, CryptoEngine
 from meshbox.files import FileManager
 from meshbox.network import (
@@ -75,7 +75,7 @@ class MeshBoxDaemon:
             self.data_dir / "files"
         )
 
-        self.network = NetworkManager(profile)
+        self.network = NetworkManager(profile, signing_key=self.profile_mgr.identity.signing_key)
         self.network.on_peer_discovered = self._on_peer_discovered
         self.network.on_message_received = self._on_message_received
         self.network.on_delivery_receipt = self._on_delivery_receipt
@@ -87,6 +87,8 @@ class MeshBoxDaemon:
             asyncio.create_task(self.network.start()),
             asyncio.create_task(self._periodic_sync()),
             asyncio.create_task(self._periodic_cleanup()),
+            asyncio.create_task(self._periodic_gossip()),
+            asyncio.create_task(self._periodic_stats()),
         ]
 
         # Start Tor if enabled
@@ -287,7 +289,7 @@ class MeshBoxDaemon:
         if inner.get("onion"):
             next_hop = inner.get("next_hop", "")
             if self.network and next_hop:
-                result = await self.network.send_to_peer_or_tor(next_hop, "onion", inner)
+                result = await self.network.send_to_peer_or_tor(next_hop, "onion", inner, storage=self.storage)
                 if result:
                     logging.info("Forwarding onion message to %s", next_hop)
                 else:
@@ -315,13 +317,13 @@ class MeshBoxDaemon:
                 "timestamp": int(time.time()),
             }
             await self.network.send_to_peer_or_tor(
-                recipient_fp, "receipt", receipt_payload
+                recipient_fp, "receipt", receipt_payload, storage=self.storage
             )
         except Exception as e:
             logging.debug("Failed to send delivery receipt: %s", e)
 
     async def _sync_with_peer(self, peer: PeerInfo):
-        if not self.network or peer.connection_type != "wifi":
+        if not self.network or peer.connection_type not in ("wifi", "mdns"):
             return
 
         local_profile = self.profile_mgr.get_local_profile()
@@ -563,8 +565,10 @@ class MeshBoxDaemon:
                 self._sync_interval = 120  # idle
 
             if self.network:
-                for peer in self.network.get_peers():
-                    if peer.connection_type == "wifi":
+                peers = self.network.get_peers()
+                # Sync with all LAN peers (wifi + mdns)
+                for peer in peers:
+                    if peer.connection_type in ("wifi", "mdns"):
                         await self._sync_with_peer(peer)
 
                 # Also sync with Tor peers
@@ -579,17 +583,21 @@ class MeshBoxDaemon:
             return
         try:
             fp = tor_peer["fingerprint"]
+            onion = tor_peer.get("onion_address", "")
+            if not onion:
+                return
             relay_messages = self.storage.get_relay_messages_for(fp)
             if relay_messages:
                 for msg in relay_messages:
                     msg["encrypted_payload"] = json.loads(msg["encrypted_payload"]) \
                         if isinstance(msg["encrypted_payload"], str) else msg["encrypted_payload"]
                 resp = await self.tor_manager.send_to_onion(
-                    fp, "sync", {
+                    onion, "sync", {
                         "sender_fingerprint": self.profile_mgr.identity.fingerprint,
                         "messages_for_you": relay_messages,
                         "relay_messages": [],
-                    }
+                    },
+                    storage=self.storage,
                 )
                 if resp and resp.get("status") == "ok":
                     for msg in relay_messages:
@@ -597,6 +605,66 @@ class MeshBoxDaemon:
                     logging.info("Tor sync: %d messages to %s", len(relay_messages), fp[:8])
         except Exception as e:
             logging.debug("Tor sync error with %s: %s", tor_peer.get("fingerprint", "?")[:8], e)
+
+    async def _periodic_gossip(self):
+        """Periodically gossip peer lists with neighbors for relay optimization."""
+        await asyncio.sleep(30)  # Initial delay
+        while self._running:
+            try:
+                if self.network and self.directory_client:
+                    # Gossip with local WiFi/mDNS peers
+                    tor_peers = self.storage.get_active_tor_peers(max_age=3600)
+                    for tp in tor_peers[:5]:
+                        onion = tp.get("onion_address", "")
+                        if onion:
+                            await self.directory_client.gossip_peers(onion)
+
+                    # Gossip with directly connected peers via TCP
+                    local_peers = self.network.get_peers()
+                    if local_peers:
+                        my_fp = self.profile_mgr.identity.fingerprint
+                        known_peers = self.storage.get_active_tor_peers(max_age=7200)
+                        peer_list = [
+                            {
+                                "fingerprint": p.get("fingerprint", ""),
+                                "onion_address": p.get("onion_address", ""),
+                                "name": p.get("name", ""),
+                            }
+                            for p in known_peers[:20]
+                        ]
+                        for peer in local_peers[:5]:
+                            if peer.connection_type in ("wifi", "mdns"):
+                                await self.network.transport.send_to_peer(
+                                    peer, "peer_gossip", {
+                                        "fingerprint": my_fp,
+                                        "peers": peer_list,
+                                    },
+                                    retries=1,
+                                )
+            except Exception as e:
+                logging.debug("Gossip error: %s", e)
+
+            await asyncio.sleep(GOSSIP_INTERVAL)
+
+    async def _periodic_stats(self):
+        """Periodically persist network statistics."""
+        while self._running:
+            await asyncio.sleep(NETWORK_STATS_SAVE_INTERVAL)
+            try:
+                if self.network:
+                    bw = self.network.transport.get_bandwidth_stats()
+                    self.storage.set_setting("net_bytes_sent",
+                                             str(bw.get("bytes_sent", 0)))
+                    self.storage.set_setting("net_bytes_received",
+                                             str(bw.get("bytes_received", 0)))
+                    self.storage.set_setting("net_messages_sent",
+                                             str(bw.get("messages_sent", 0)))
+                    self.storage.set_setting("net_messages_received",
+                                             str(bw.get("messages_received", 0)))
+                    self.storage.set_setting("net_active_peers",
+                                             str(len(self.network.get_peers())))
+            except Exception as e:
+                logging.debug("Stats persistence error: %s", e)
 
     async def _periodic_cleanup(self):
         while self._running:
