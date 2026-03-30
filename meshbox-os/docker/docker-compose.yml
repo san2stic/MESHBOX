@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  meshbox:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - meshbox-data:/home/meshbox/.meshbox
+    restart: unless-stopped
+    environment:
+      - MESHBOX_DATA_DIR=/home/meshbox/.meshbox
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # For local simulation: run multiple nodes
+  # docker compose up --scale meshbox-sim=5
+  meshbox-sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    profiles:
+      - simulation
+    environment:
+      - MESHBOX_DATA_DIR=/home/meshbox/.meshbox
+
+volumes:
+  meshbox-data:

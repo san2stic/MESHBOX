@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meshbox"
-version = "4.0.0"
-description = "Decentralized encrypted mesh communication CLI"
+version = "5.0.0"
+description = "Decentralized encrypted mesh network with SANP protocol over Tor"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -31,6 +31,7 @@ classifiers = [
 dependencies = [
     "PyNaCl>=1.5.0",
     "click>=8.1.0",
+    "msgpack>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,14 @@ network = [
 tor = [
     "stem>=1.8.0",
     "PySocks>=1.7.0",
+]
+sanp = [
+    "msgpack>=1.0.0",
+    "stem>=1.8.0",
+    "PySocks>=1.7.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "pydantic>=2.0.0",
 ]
 all = [
     "Flask>=3.0.0",

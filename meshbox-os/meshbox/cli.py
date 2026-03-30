@@ -1003,6 +1003,76 @@ def tor_directory_status():
 
 
 # ═══════════════════════════════════════════════════════════════
+# SANP mesh daemon command
+# ═══════════════════════════════════════════════════════════════
+
+@cli.command("start")
+@click.option("--port", "-p", default=7777, type=int, help="SANP protocol port (default: 7777)")
+@click.option("--api-port", default=8080, type=int, help="REST API port (default: 8080)")
+@click.option("--data-dir", "-d", default="~/.meshbox", help="Data directory")
+@click.option("--seeds", "-s", default="", help="Comma-separated seed addresses (host.onion:port)")
+@click.option("--passphrase", envvar="MESHBOX_PASSPHRASE", default="", help="Identity encryption passphrase")
+@click.option("--log-level", "-l", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
+              default="INFO", help="Logging level")
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
+def start_sanp(port, api_port, data_dir, seeds, passphrase, log_level, verbose):
+    """Start the SANP mesh network daemon.
+
+    \b
+    This launches the full Tor-based mesh node:
+      - Ed25519/X25519 cryptographic identity
+      - Tor hidden service (.onion)
+      - SANP protocol server (port 7777)
+      - REST API (port 8080)
+      - DHT discovery + gossip protocol
+      - Automatic peer bootstrap
+
+    \b
+    Examples:
+      meshbox start
+      meshbox start --port 7777 --api-port 8080
+      meshbox start --seeds "abc.onion:7777,def.onion:7777"
+      meshbox start -v  # verbose/debug mode
+    """
+    import asyncio
+    import logging
+
+    level = logging.DEBUG if verbose else getattr(logging, log_level)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    seed_list = [s.strip() for s in seeds.split(",") if s.strip()] if seeds else None
+
+    from meshbox.main import _run_daemon
+
+    click.echo("╔══════════════════════════════════════════╗")
+    click.echo("║       MESHBOX SANP NODE v5.0             ║")
+    click.echo("╚══════════════════════════════════════════╝")
+    click.echo(f"  Data dir:   {data_dir}")
+    click.echo(f"  SANP port:  {port}")
+    click.echo(f"  API port:   {api_port}")
+    if seed_list:
+        click.echo(f"  Seeds:      {', '.join(seed_list)}")
+    click.echo()
+    click.echo("Press Ctrl+C to stop.")
+    click.echo()
+
+    try:
+        asyncio.run(_run_daemon(
+            data_dir=data_dir,
+            sanp_port=port,
+            api_port=api_port,
+            passphrase=passphrase,
+            seeds=seed_list,
+        ))
+    except KeyboardInterrupt:
+        click.echo("\nNode stopped.")
+
+
+# ═══════════════════════════════════════════════════════════════
 # Update commands
 # ═══════════════════════════════════════════════════════════════
 
