@@ -1,7 +1,8 @@
 """
-MeshBox - Web UI v4 (optional).
+MeshBox - Web UI v5 (SANP-integrated).
 Local Flask server for managing MeshBox via a browser.
 Features:
+- SANP daemon API integration for sending/receiving
 - Server-Sent Events (SSE) for real-time updates
 - CSRF protection on all POST forms
 - Tor connectivity management
@@ -32,11 +33,49 @@ from flask import (
     abort,
 )
 
-from meshbox.config import DATA_DIR, MAX_FILE_SIZE
+from meshbox.config import DATA_DIR, MAX_FILE_SIZE, API_HOST, API_PORT
 from meshbox.crypto import Identity, CryptoEngine
 from meshbox.files import FileManager
 from meshbox.profiles import ProfileManager
 from meshbox.storage import StorageEngine
+
+
+def _sanp_api_url(path: str) -> str:
+    return f"http://{API_HOST}:{API_PORT}{path}"
+
+
+def _sanp_api_get(path: str):
+    """GET from SANP daemon API. Returns parsed JSON or None."""
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(_sanp_api_url(path))
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _sanp_api_post(path: str, data: dict):
+    """POST to SANP daemon API. Returns parsed JSON or None."""
+    import urllib.request
+    import urllib.error
+    try:
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            _sanp_api_url(path),
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _sanp_daemon_running() -> bool:
+    return _sanp_api_get("/api/v1/node/status") is not None
 
 
 def _get_or_create_secret_key(data_dir: Path) -> str:
@@ -348,30 +387,47 @@ def create_app(data_dir: Path = None) -> Flask:
                 alert = "Recipient and message required."
                 alert_type = "error"
             else:
-                contact = storage.get_profile(recipient)
-                if not contact:
-                    alert = "Unknown recipient."
-                    alert_type = "error"
-                else:
-                    crypto = CryptoEngine(profile_mgr.identity)
-                    encrypted = crypto.encrypt_message(message_text, contact["box_public_key"])
-
-                    msg = {
-                        "message_id": str(uuid.uuid4()),
-                        "sender_fingerprint": profile_mgr.identity.fingerprint,
+                # Try SANP API first for real message delivery
+                if _sanp_daemon_running():
+                    resp = _sanp_api_post("/api/v1/message/send", {
                         "recipient_fingerprint": recipient,
-                        "encrypted_payload": encrypted,
-                        "timestamp": int(time.time()),
-                        "ttl": 604800,
-                        "hop_count": 0,
-                        "delivered": 0,
-                        "proof_of_work": 0,
-                    }
-                    storage.save_message(msg)
-                    storage.save_relay_message(msg)
+                        "plaintext": message_text,
+                    })
+                    if resp and resp.get("message_id"):
+                        alert = f"Message sent via SANP to {contact['name'] if contact else recipient[:12]}!"
+                        alert_type = "success"
+                    else:
+                        alert = "Failed to send via SANP daemon."
+                        alert_type = "error"
+                elif profile_mgr.is_initialized:
+                    # Fallback: direct encrypt and queue
+                    contact = storage.get_profile(recipient)
+                    if not contact:
+                        alert = "Unknown recipient."
+                        alert_type = "error"
+                    else:
+                        crypto = CryptoEngine(profile_mgr.identity)
+                        encrypted = crypto.encrypt_message(message_text, contact["box_public_key"])
 
-                    alert = f"Encrypted message sent to {contact['name']}!"
-                    alert_type = "success"
+                        msg = {
+                            "message_id": str(uuid.uuid4()),
+                            "sender_fingerprint": profile_mgr.identity.fingerprint,
+                            "recipient_fingerprint": recipient,
+                            "encrypted_payload": encrypted,
+                            "timestamp": int(time.time()),
+                            "ttl": 604800,
+                            "hop_count": 0,
+                            "delivered": 0,
+                            "proof_of_work": 0,
+                        }
+                        storage.save_message(msg)
+                        storage.save_relay_message(msg)
+
+                        alert = f"Message queued for {contact['name']} (offline mode)."
+                        alert_type = "success"
+                else:
+                    alert = "SANP daemon not running and no local identity."
+                    alert_type = "error"
 
         return render_template(
             "send.html", title="Compose", active="send",
@@ -677,15 +733,24 @@ def create_app(data_dir: Path = None) -> Flask:
             pass
 
         storage.save_sos_alert(alert)
-        relay_msg = {
-            "message_id": alert["alert_id"],
-            "sender_fingerprint": p["fingerprint"],
-            "recipient_fingerprint": "__SOS_BROADCAST__",
-            "encrypted_payload": {"type": "sos", "alert": alert},
-            "timestamp": alert["timestamp"],
-            "ttl": 86400, "hop_count": 0,
-        }
-        storage.save_relay_message(relay_msg)
+
+        # Broadcast via SANP gossip if daemon running
+        if _sanp_daemon_running():
+            _sanp_api_post("/api/v1/sos", {
+                "message": message,
+                "severity": severity,
+            })
+        else:
+            # Queue for relay when daemon starts
+            relay_msg = {
+                "message_id": alert["alert_id"],
+                "sender_fingerprint": p["fingerprint"],
+                "recipient_fingerprint": "__SOS_BROADCAST__",
+                "encrypted_payload": {"type": "sos", "alert": alert},
+                "timestamp": alert["timestamp"],
+                "ttl": 86400, "hop_count": 0,
+            }
+            storage.save_relay_message(relay_msg)
         flash("SOS alert broadcast!", "success")
         return redirect(url_for("sos_page"))
 
@@ -775,22 +840,26 @@ def create_app(data_dir: Path = None) -> Flask:
             "content": content,
         })
 
-        relay_msg = {
-            "message_id": msg_id,
-            "sender_fingerprint": p["fingerprint"],
-            "recipient_fingerprint": "__CHANNEL_BROADCAST__",
-            "encrypted_payload": {
-                "type": "channel",
+        # Broadcast via SANP gossip if daemon running
+        if _sanp_daemon_running():
+            _sanp_api_post(f"/api/v1/channels/{channel_id}/post", {"content": content})
+        else:
+            relay_msg = {
                 "message_id": msg_id,
-                "channel_id": channel_id,
                 "sender_fingerprint": p["fingerprint"],
-                "content": content,
-            },
-            "timestamp": int(time.time()),
-            "ttl": 604800,
-            "hop_count": 0,
-        }
-        storage.save_relay_message(relay_msg)
+                "recipient_fingerprint": "__CHANNEL_BROADCAST__",
+                "encrypted_payload": {
+                    "type": "channel",
+                    "message_id": msg_id,
+                    "channel_id": channel_id,
+                    "sender_fingerprint": p["fingerprint"],
+                    "content": content,
+                },
+                "timestamp": int(time.time()),
+                "ttl": 604800,
+                "hop_count": 0,
+            }
+            storage.save_relay_message(relay_msg)
 
         return redirect(url_for("channel_view", channel_id=channel_id))
 
