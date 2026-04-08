@@ -225,6 +225,19 @@ class StorageEngine:
                     ack_received INTEGER DEFAULT 0
                 );
 
+                -- v4: Pending messages for retransmission
+                CREATE TABLE IF NOT EXISTS pending_messages (
+                    message_id TEXT PRIMARY KEY,
+                    sender_fingerprint TEXT NOT NULL,
+                    recipient_fingerprint TEXT NOT NULL,
+                    encrypted_payload TEXT NOT NULL,
+                    priority INTEGER DEFAULT 0,
+                    attempt INTEGER DEFAULT 0,
+                    next_retry_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    max_attempts INTEGER DEFAULT 10
+                );
+
                 -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_messages_recipient
                     ON messages(recipient_fingerprint);
@@ -258,6 +271,10 @@ class StorageEngine:
                     ON tor_peers(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
+                CREATE INDEX IF NOT EXISTS idx_pending_retry
+                    ON pending_messages(next_retry_at);
+                CREATE INDEX IF NOT EXISTS idx_pending_recipient
+                    ON pending_messages(recipient_fingerprint);
             """)
             # Migration: add columns if upgrading from older schema
             try:
@@ -460,6 +477,69 @@ class StorageEngine:
             "SELECT * FROM delivery_receipts WHERE message_id = ?", (message_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    # === Pending messages for retransmission ===
+
+    def save_pending_message(self, message: dict):
+        """Save a message to the pending queue for retransmission."""
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO pending_messages
+                (message_id, sender_fingerprint, recipient_fingerprint,
+                 encrypted_payload, priority, attempt, next_retry_at,
+                 created_at, max_attempts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                message["message_id"],
+                message["sender_fingerprint"],
+                message["recipient_fingerprint"],
+                json.dumps(message["encrypted_payload"]),
+                message.get("priority", 0),
+                message.get("attempt", 0),
+                message["next_retry_at"],
+                message.get("created_at", int(time.time())),
+                message.get("max_attempts", 10),
+            ))
+
+    def get_pending_messages(self, before_timestamp: int) -> list:
+        """Get all pending messages that are due for retry."""
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT * FROM pending_messages
+            WHERE next_retry_at <= ? AND attempt < max_attempts
+            ORDER BY next_retry_at ASC
+        """, (before_timestamp,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_pending_message(self, message_id: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM pending_messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_pending_message(self, message_id: str, attempt: int, next_retry_at: int):
+        """Update retry state of a pending message."""
+        with self._transaction() as conn:
+            conn.execute("""
+                UPDATE pending_messages
+                SET attempt = ?, next_retry_at = ?
+                WHERE message_id = ?
+            """, (attempt, next_retry_at, message_id))
+
+    def delete_pending_message(self, message_id: str):
+        """Remove a message from the pending queue (after success or max retries)."""
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM pending_messages WHERE message_id = ?", (message_id,))
+
+    def get_pending_count(self, recipient_fingerprint: str = None) -> int:
+        conn = self._get_conn()
+        if recipient_fingerprint:
+            return conn.execute(
+                "SELECT COUNT(*) FROM pending_messages WHERE recipient_fingerprint = ?",
+                (recipient_fingerprint,)
+            ).fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM pending_messages").fetchone()[0]
 
     # === Relay messages (store-and-forward) ===
 
