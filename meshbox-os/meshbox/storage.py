@@ -258,6 +258,43 @@ class StorageEngine:
                     ON tor_peers(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
+
+                -- v5: Pre-keys for X3DH (Signal Protocol)
+                CREATE TABLE IF NOT EXISTS prekeys (
+                    prekey_id INTEGER PRIMARY KEY,
+                    public_key TEXT NOT NULL,
+                    private_key TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    used INTEGER DEFAULT 0
+                );
+
+                -- v5: Double Ratchet session states
+                CREATE TABLE IF NOT EXISTS ratchet_states (
+                    peer_fingerprint TEXT PRIMARY KEY,
+                    root_key TEXT NOT NULL,
+                    sending_chain_key TEXT NOT NULL,
+                    receiving_chain_key TEXT NOT NULL,
+                    sending_ratchet_key TEXT,
+                    receiving_ratchet_key TEXT,
+                    previous_chain_length INTEGER DEFAULT 0,
+                    sending_ratchet_key_public TEXT,
+                    receiving_ratchet_key_public TEXT,
+                    message_number INTEGER DEFAULT 0,
+                    previous_message_number INTEGER DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                -- v5: Pre-key bundles for remote peers
+                CREATE TABLE IF NOT EXISTS prekey_bundles (
+                    peer_fingerprint TEXT PRIMARY KEY,
+                    identity_key TEXT NOT NULL,
+                    signed_prekey TEXT NOT NULL,
+                    signed_prekey_id INTEGER NOT NULL,
+                    signed_prekey_sig TEXT NOT NULL,
+                    one_time_prekey TEXT,
+                    fetched_at INTEGER NOT NULL
+                );
             """)
             # Migration: add columns if upgrading from older schema
             try:
@@ -1051,3 +1088,109 @@ class StorageEngine:
         with self._transaction() as conn:
             conn.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
+    # === Pre-keys for X3DH ===
+
+    def save_prekey(self, prekey_id: int, public_key: str, private_key: str):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO prekeys (prekey_id, public_key, private_key, created_at, used)
+                VALUES (?, ?, ?, ?, 0)
+            """, (prekey_id, public_key, private_key, int(time.time())))
+
+    def get_prekey(self, prekey_id: int) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM prekeys WHERE prekey_id = ? AND used = 0", (prekey_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_prekey_used(self, prekey_id: int):
+        with self._transaction() as conn:
+            conn.execute("UPDATE prekeys SET used = 1 WHERE prekey_id = ?", (prekey_id,))
+
+    def get_available_prekeys(self, count: int = 100) -> list:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM prekeys WHERE used = 0 ORDER BY prekey_id LIMIT ?", (count,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_old_prekeys(self, keep: int = 100):
+        with self._transaction() as conn:
+            conn.execute("""
+                DELETE FROM prekeys WHERE prekey_id NOT IN (
+                    SELECT prekey_id FROM prekeys WHERE used = 0 ORDER BY prekey_id DESC LIMIT ?
+                )
+            """, (keep,))
+
+    # === Pre-key bundles from peers ===
+
+    def save_prekey_bundle(self, peer_fingerprint: str, bundle: dict):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO prekey_bundles
+                (peer_fingerprint, identity_key, signed_prekey, signed_prekey_id,
+                 signed_prekey_sig, one_time_prekey, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                peer_fingerprint,
+                bundle.get("identity_key", ""),
+                bundle.get("signed_prekey", ""),
+                bundle.get("signed_prekey_id", 0),
+                bundle.get("signed_prekey_sig", ""),
+                bundle.get("one_time_prekey"),
+                int(time.time()),
+            ))
+
+    def get_prekey_bundle(self, peer_fingerprint: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM prekey_bundles WHERE peer_fingerprint = ?", (peer_fingerprint,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    # === Double Ratchet state ===
+
+    def save_ratchet_state(self, peer_fingerprint: str, state: dict):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO ratchet_states
+                (peer_fingerprint, root_key, sending_chain_key, receiving_chain_key,
+                 sending_ratchet_key, receiving_ratchet_key, previous_chain_length,
+                 sending_ratchet_key_public, receiving_ratchet_key_public,
+                 message_number, previous_message_number, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                peer_fingerprint,
+                state.get("root_key", ""),
+                state.get("sending_chain_key", ""),
+                state.get("receiving_chain_key", ""),
+                state.get("sending_ratchet_key"),
+                state.get("receiving_ratchet_key"),
+                state.get("previous_chain_length", 0),
+                state.get("sending_ratchet_key_public"),
+                state.get("receiving_ratchet_key_public"),
+                state.get("message_number", 0),
+                state.get("previous_message_number", 0),
+                state.get("created_at", int(time.time())),
+                int(time.time()),
+            ))
+
+    def get_ratchet_state(self, peer_fingerprint: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM ratchet_states WHERE peer_fingerprint = ?", (peer_fingerprint,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def delete_ratchet_state(self, peer_fingerprint: str):
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM ratchet_states WHERE peer_fingerprint = ?", (peer_fingerprint,))
+
+    def has_ratchet_session(self, peer_fingerprint: str) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM ratchet_states WHERE peer_fingerprint = ?", (peer_fingerprint,)
+        ).fetchone()
+        return row is not None
