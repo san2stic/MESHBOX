@@ -48,6 +48,10 @@ from meshbox.config import (
     PRIORITY_CHANNEL,
     PRIORITY_FILE,
     PRIORITY_RELAY,
+    BATCHING_ENABLED,
+    BATCH_FLUSH_INTERVAL_MS,
+    BATCH_MAX_SIZE_BYTES,
+    BATCH_MAX_QUEUE_SIZE,
 )
 
 logger = logging.getLogger("meshbox.network")
@@ -108,6 +112,106 @@ class RateLimiter:
         ]
         for k in empty_keys:
             del self._buckets[k]
+
+
+class BatchBuffer:
+    """Per-peer message batching buffer with timer-based and size-based flush.
+
+    Flush triggers:
+    - Timer: default 10ms interval
+    - Size limit: configurable max bytes
+    - Priority bypass: PRIORITY_SOS and PRIORITY_RECEIPT skip batching
+
+    Back-pressure: if queue is full, caller is blocked.
+    """
+
+    def __init__(
+        self,
+        peer_fingerprint: str,
+        flush_interval_ms: int = BATCH_FLUSH_INTERVAL_MS,
+        max_size_bytes: int = BATCH_MAX_SIZE_BYTES,
+        max_queue_size: int = BATCH_MAX_QUEUE_SIZE,
+    ):
+        self.peer_fingerprint = peer_fingerprint
+        self.flush_interval_ms = flush_interval_ms
+        self.max_size_bytes = max_size_bytes
+        self.max_queue_size = max_queue_size
+
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self._current_size = 0
+        self._timer_task: Optional[asyncio.Task] = None
+        self._flush_callback: Optional[Callable] = None
+        self._closed = False
+
+    def set_flush_callback(self, callback: Callable):
+        """Set the callback to call when flushing the batch."""
+        self._flush_callback = callback
+
+    async def start(self):
+        """Start the periodic flush timer."""
+        if self._timer_task is not None:
+            return
+        self._timer_task = asyncio.create_task(self._flush_loop())
+
+    async def _flush_loop(self):
+        """Periodically flush the batch."""
+        while not self._closed:
+            await asyncio.sleep(self.flush_interval_ms / 1000.0)
+            if not self._closed:
+                await self.flush()
+
+    async def add(self, msg_type: int, payload: Any, priority: int = PRIORITY_DIRECT) -> bool:
+        """Add a message to the batch queue.
+
+        Returns True if queued, False if queue is full (back-pressure).
+        PRIORITY_SOS and PRIORITY_RECEIPT are always sent immediately.
+        """
+        if priority == PRIORITY_SOS or priority == PRIORITY_RECEIPT:
+            return False
+
+        if self._closed:
+            return False
+
+        msg_size = len(json.dumps(payload).encode("utf-8")) if payload else 0
+
+        try:
+            self._queue.put_nowait((msg_type, payload, priority, msg_size))
+            self._current_size += msg_size
+        except asyncio.QueueFull:
+            return False
+
+        if self._current_size >= self.max_size_bytes:
+            await self.flush()
+
+        return True
+
+    async def flush(self):
+        """Flush all queued messages as a batch."""
+        if self._closed:
+            return
+
+        items = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+                items.append(item)
+                self._current_size = max(0, self._current_size - item[3])
+            except asyncio.QueueEmpty:
+                break
+
+        if items and self._flush_callback:
+            await self._flush_callback(self.peer_fingerprint, items)
+
+    async def close(self):
+        """Flush pending messages and stop the timer."""
+        self._closed = True
+        if self._timer_task:
+            self._timer_task.cancel()
+            try:
+                await self._timer_task
+            except asyncio.CancelledError:
+                pass
+        await self.flush()
 
 
 class MessageDeduplicator:

@@ -57,6 +57,7 @@ class MessageType(IntEnum):
     GOSSIP = 0x40
     SYNC_REQ = 0x50
     SYNC_DATA = 0x51
+    BATCH = 0x60
     ERROR = 0xFF
 
 
@@ -104,6 +105,8 @@ class SANPFrame:
 
         Returns True if valid, False otherwise.
         """
+        if pubkey is None:
+            return False
         try:
             vk = nacl.signing.VerifyKey(pubkey)
             vk.verify(self._signable_bytes(), self.signature)
@@ -150,6 +153,36 @@ class SANPFrame:
             msg_type=int(msg_type),
             msg_id=os.urandom(MSG_ID_LEN),
             payload=payload,
+        )
+
+
+@dataclass
+class BatchSubFrame:
+    """A single frame embedded within a BATCH frame.
+
+    Each sub-frame has its own priority and metadata.
+    """
+
+    msg_type: int
+    msg_id: bytes = field(default_factory=lambda: os.urandom(MSG_ID_LEN))
+    priority: int = 2
+    payload: Any = None
+
+    def to_msgpack(self) -> dict:
+        return {
+            b"t": self.msg_type,
+            b"i": self.msg_id,
+            b"p": self.priority,
+            b"d": self.payload,
+        }
+
+    @classmethod
+    def from_msgpack(cls, obj: dict) -> BatchSubFrame:
+        return cls(
+            msg_type=obj[b"t"],
+            msg_id=obj[b"i"],
+            priority=obj.get(b"p", 2),
+            payload=obj.get(b"d"),
         )
 
 
@@ -297,3 +330,30 @@ class SANPHandshake:
             peer_ephemeral.encode(nacl.encoding.RawEncoder),
         )
         return hashlib.sha3_256(shared).digest()
+
+
+# ---------------------------------------------------------------------------
+# Batch frame helpers
+# ---------------------------------------------------------------------------
+
+
+def make_batch_frame(subframes: list[BatchSubFrame], batch_id: bytes = None) -> SANPFrame:
+    """Create a BATCH frame containing multiple sub-frames."""
+    if batch_id is None:
+        batch_id = os.urandom(MSG_ID_LEN)
+    payload = {
+        b"id": batch_id,
+        b"frames": [f.to_msgpack() for f in subframes],
+    }
+    return SANPFrame.make(MessageType.BATCH, payload)
+
+
+def parse_batch_frame(frame: SANPFrame) -> tuple[bytes, list[BatchSubFrame]]:
+    """Parse a BATCH frame into its batch_id and sub-frames."""
+    p = frame.payload
+    batch_id = p.get(b"id", os.urandom(MSG_ID_LEN))
+    subframes = [
+        BatchSubFrame.from_msgpack(obj)
+        for obj in p.get(b"frames", [])
+    ]
+    return batch_id, subframes

@@ -84,6 +84,12 @@ PRIORITY_CHANNEL = 3
 PRIORITY_FILE = 4
 PRIORITY_RELAY = 5
 
+# ── Message batching ───────────────────────────────────────────
+BATCHING_ENABLED = True
+BATCH_FLUSH_INTERVAL_MS = 10
+BATCH_MAX_SIZE_BYTES = 65536
+BATCH_MAX_QUEUE_SIZE = 100
+
 # ── Sync ───────────────────────────────────────────────────────
 SYNC_INVENTORY_HASH_LEN = 12
 NETWORK_STATS_SAVE_INTERVAL = 300
