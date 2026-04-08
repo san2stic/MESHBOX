@@ -97,7 +97,8 @@ class StorageEngine:
                     created_at INTEGER NOT NULL,
                     disappear_after_read INTEGER DEFAULT 0,
                     disappear_timer INTEGER DEFAULT 0,
-                    read_at INTEGER DEFAULT 0
+                    read_at INTEGER DEFAULT 0,
+                    expires_at INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS relay_messages (
@@ -258,6 +259,10 @@ class StorageEngine:
                     ON tor_peers(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
+                CREATE INDEX IF NOT EXISTS idx_messages_expires_at
+                    ON messages(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_disappear
+                    ON messages(disappear_after_read, read, read_at, disappear_timer);
             """)
             # Migration: add columns if upgrading from older schema
             try:
@@ -276,6 +281,10 @@ class StorageEngine:
                 conn.execute("SELECT read_at FROM messages LIMIT 1")
             except sqlite3.OperationalError:
                 conn.execute("ALTER TABLE messages ADD COLUMN read_at INTEGER DEFAULT 0")
+            try:
+                conn.execute("SELECT expires_at FROM messages LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE messages ADD COLUMN expires_at INTEGER DEFAULT 0")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_delivery_status ON messages(delivery_status)")
 
     # === Node Settings ===
@@ -1051,3 +1060,98 @@ class StorageEngine:
         with self._transaction() as conn:
             conn.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
+    # === Disappearing Messages ===
+
+    DISAPPEARING_INTERVALS = {
+        "5s": 5,
+        "30s": 30,
+        "1m": 60,
+        "5m": 300,
+        "1h": 3600,
+        "1d": 86400,
+        "1w": 604800,
+    }
+
+    def set_message_expiry(self, message_id: str, seconds: int, mode: str = "sent") -> bool:
+        with self._transaction() as conn:
+            if mode == "read":
+                conn.execute("""
+                    UPDATE messages SET
+                        disappear_after_read = 1,
+                        disappear_timer = ?,
+                        expires_at = 0
+                    WHERE message_id = ?
+                """, (seconds, message_id))
+            else:
+                now = int(time.time())
+                conn.execute("""
+                    UPDATE messages SET
+                        disappear_after_read = 0,
+                        disappear_timer = ?,
+                        expires_at = ?
+                    WHERE message_id = ?
+                """, (seconds, now + seconds, message_id))
+            return conn.rowcount > 0
+
+    def get_message_expiry(self, message_id: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT message_id, disappear_after_read, disappear_timer,
+                   read_at, expires_at, timestamp
+            FROM messages WHERE message_id = ?
+        """, (message_id,)).fetchone()
+        return dict(row) if row else None
+
+    def purge_expired_messages(self) -> int:
+        now = int(time.time())
+        with self._transaction() as conn:
+            expired = conn.execute("""
+                SELECT message_id FROM messages
+                WHERE expires_at > 0 AND expires_at < ?
+            """, (now,)).fetchall()
+
+            deleted_count = 0
+            for row in expired:
+                msg_id = row["message_id"]
+                self._secure_delete_message(conn, msg_id)
+                deleted_count += 1
+
+            conn.execute("""
+                DELETE FROM messages
+                WHERE disappear_after_read = 1
+                AND read = 1
+                AND read_at > 0
+                AND (read_at + disappear_timer) < ?
+            """, (now,))
+            deleted_count += conn.rowcount
+
+            return deleted_count
+
+    def _secure_delete_message(self, conn, message_id: str):
+        random_data = secrets.token_bytes(256)
+        conn.execute("""
+            UPDATE messages SET
+                encrypted_payload = ?,
+                message_id = ?
+            WHERE message_id = ?
+        """, (random_data.hex(), f"deleted_{message_id}", message_id))
+        conn.execute("DELETE FROM messages WHERE message_id = ?", (f"deleted_{message_id}",))
+
+    def set_conversation_timer(self, peer_fingerprint: str, interval: str, mode: str = "sent") -> bool:
+        seconds = self.DISAPPEARING_INTERVALS.get(interval)
+        if not seconds:
+            return False
+        self.set_setting(f"disappear_timer_{peer_fingerprint}", str(seconds))
+        self.set_setting(f"disappear_mode_{peer_fingerprint}", mode)
+        return True
+
+    def get_conversation_timer(self, peer_fingerprint: str) -> Optional[dict]:
+        timer_seconds = self.get_setting(f"disappear_timer_{peer_fingerprint}", "0")
+        mode = self.get_setting(f"disappear_mode_{peer_fingerprint}", "sent")
+        if timer_seconds == "0":
+            return None
+        for interval, secs in self.DISAPPEARING_INTERVALS.items():
+            if secs == int(timer_seconds):
+                return {"interval": interval, "seconds": secs, "mode": mode}
+        return {"interval": "custom", "seconds": int(timer_seconds), "mode": mode}

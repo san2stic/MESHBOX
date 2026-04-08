@@ -52,6 +52,7 @@ class MessageType(IntEnum):
     PEER_REQUEST = 0x11
     MESSAGE = 0x20
     MESSAGE_ACK = 0x21
+    MSG_EXPIRE = 0x22
     ROUTE = 0x30
     ROUTE_REQ = 0x31
     GOSSIP = 0x40
