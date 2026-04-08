@@ -48,6 +48,23 @@ from meshbox.config import (
     PRIORITY_CHANNEL,
     PRIORITY_FILE,
     PRIORITY_RELAY,
+    CIRCUIT_BREAKER_ENABLED,
+    CB_FAILURE_THRESHOLD,
+    CB_RECOVERY_TIMEOUT,
+    CB_HALF_OPEN_PROBE_COUNT,
+    CB_WINDOW_SIZE,
+    RATE_LIMIT_ADAPTIVE,
+    RATE_LIMIT_BASE_REFILLS_PER_SEC,
+    RATE_LIMIT_MIN_REFILLS_PER_SEC,
+    RATE_LIMIT_MAX_REFILLS_PER_SEC,
+    RATE_LIMIT_CONGESTION_THRESHOLD,
+    RATE_LIMIT_LATENCY_THRESHOLD_MS,
+    RATE_LIMIT_SOS_PER_MIN,
+    RATE_LIMIT_RECEIPT_PER_MIN,
+    RATE_LIMIT_DIRECT_PER_MIN,
+    RATE_LIMIT_CHANNEL_PER_MIN,
+    RATE_LIMIT_FILE_PER_MIN,
+    RATE_LIMIT_RELAY_PER_MIN,
 )
 
 logger = logging.getLogger("meshbox.network")
@@ -74,6 +91,234 @@ RETRY_BASE_DELAY = 1.0  # seconds, doubles each retry
 
 # Bandwidth throttle (bytes/sec, 0 = unlimited)
 BANDWIDTH_LIMIT = 0
+
+
+class CircuitBreakerState:
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreaker:
+    """Circuit breaker for per-peer failure protection.
+    
+    States:
+    - CLOSED: Normal operation, requests allowed
+    - OPEN: Too many failures, requests blocked
+    - HALF_OPEN: Testing if peer recovered, limited requests allowed
+    
+    Auto-transitions:
+    - CLOSED -> OPEN when failure threshold exceeded
+    - OPEN -> HALF_OPEN after recovery_timeout
+    - HALF_OPEN -> CLOSED on successful probes, or back to OPEN on failure
+    """
+
+    def __init__(self, peer_key: str, failure_threshold: int = CB_FAILURE_THRESHOLD,
+                 recovery_timeout: int = CB_RECOVERY_TIMEOUT,
+                 half_open_probe_count: int = CB_HALF_OPEN_PROBE_COUNT,
+                 window_size: int = CB_WINDOW_SIZE):
+        self.peer_key = peer_key
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_probe_count = half_open_probe_count
+        self.window_size = window_size
+        
+        self._state = CircuitBreakerState.CLOSED
+        self._failure_times: list[float] = []
+        self._last_state_change = time.time()
+        self._half_open_successes = 0
+        self._lock = asyncio.Lock() if asyncio is not None else None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def _get_lock(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _cleanup_old_failures(self, now: float):
+        cutoff = now - self.window_size
+        self._failure_times = [t for t in self._failure_times if t > cutoff]
+
+    def _get_failure_count(self, now: float) -> int:
+        self._cleanup_old_failures(now)
+        return len(self._failure_times)
+
+    def _should_open(self, now: float) -> bool:
+        return self._get_failure_count(now) >= self.failure_threshold
+
+    def record_success(self):
+        """Record a successful request. Returns True if circuit should close."""
+        now = time.time()
+        with self._get_lock():
+            if self._state == CircuitBreakerState.HALF_OPEN:
+                self._half_open_successes += 1
+                if self._half_open_successes >= self.half_open_probe_count:
+                    self._state = CircuitBreakerState.CLOSED
+                    self._failure_times = []
+                    self._half_open_successes = 0
+                    self._last_state_change = now
+                    logger.info("Circuit breaker for %s: CLOSED (recovered)", self.peer_key[:8])
+                    return True
+            elif self._state == CircuitBreakerState.CLOSED:
+                self._cleanup_old_failures(now)
+        return False
+
+    def record_failure(self):
+        """Record a failed request. Returns True if circuit should open."""
+        now = time.time()
+        with self._get_lock():
+            if self._state == CircuitBreakerState.CLOSED:
+                self._failure_times.append(now)
+                if self._should_open(now):
+                    self._state = CircuitBreakerState.OPEN
+                    self._last_state_change = now
+                    logger.warning("Circuit breaker for %s: OPEN (failures: %d)",
+                                   self.peer_key[:8], len(self._failure_times))
+                    return True
+            elif self._state == CircuitBreakerState.HALF_OPEN:
+                self._state = CircuitBreakerState.OPEN
+                self._half_open_successes = 0
+                self._last_state_change = now
+                logger.warning("Circuit breaker for %s: OPEN (half_open probe failed)",
+                               self.peer_key[:8])
+                return True
+        return False
+
+    def can_execute(self) -> bool:
+        """Check if a request can be executed."""
+        now = time.time()
+        with self._get_lock():
+            if self._state == CircuitBreakerState.CLOSED:
+                return True
+            
+            if self._state == CircuitBreakerState.OPEN:
+                if now - self._last_state_change >= self.recovery_timeout:
+                    self._state = CircuitBreakerState.HALF_OPEN
+                    self._half_open_successes = 0
+                    self._last_state_change = now
+                    logger.info("Circuit breaker for %s: HALF_OPEN (testing recovery)",
+                                self.peer_key[:8])
+                    return True
+                return False
+            
+            if self._state == CircuitBreakerState.HALF_OPEN:
+                return True
+        
+        return False
+
+    def get_state_for_metrics(self) -> dict:
+        """Get state info for observability."""
+        return {
+            "peer_key": self.peer_key,
+            "state": self._state,
+            "failure_count": len(self._failure_times),
+            "half_open_successes": self._half_open_successes,
+            "last_state_change": self._last_state_change,
+        }
+
+
+class AdaptiveRateLimiter:
+    """Token bucket rate limiter with adaptive refill and priority support."""
+
+    def __init__(self, base_refill_rate: float = RATE_LIMIT_BASE_REFILLS_PER_SEC,
+                 min_refill_rate: float = RATE_LIMIT_MIN_REFILLS_PER_SEC,
+                 max_refill_rate: float = RATE_LIMIT_MAX_REFILLS_PER_SEC,
+                 window_seconds: int = 60):
+        self.base_refill_rate = base_refill_rate
+        self.min_refill_rate = min_refill_rate
+        self.max_refill_rate = max_refill_rate
+        self.window = window_seconds
+        
+        self._current_refill_rate = base_refill_rate
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._priority_buckets: dict[int, dict[str, list[float]]] = defaultdict(dict)
+        
+        self._queue_depth = 0
+        self._recent_latency_ms = 0.0
+        self._adaptive_enabled = RATE_LIMIT_ADAPTIVE
+        
+        self._priority_limits = {
+            PRIORITY_SOS: RATE_LIMIT_SOS_PER_MIN,
+            PRIORITY_RECEIPT: RATE_LIMIT_RECEIPT_PER_MIN,
+            PRIORITY_DIRECT: RATE_LIMIT_DIRECT_PER_MIN,
+            PRIORITY_CHANNEL: RATE_LIMIT_CHANNEL_PER_MIN,
+            PRIORITY_FILE: RATE_LIMIT_FILE_PER_MIN,
+            PRIORITY_RELAY: RATE_LIMIT_RELAY_PER_MIN,
+        }
+
+    def update_congestion(self, queue_depth: int, latency_ms: float):
+        """Update congestion signals for adaptive rate limiting."""
+        self._queue_depth = queue_depth
+        self._recent_latency_ms = latency_ms
+        
+        if not self._adaptive_enabled:
+            return
+        
+        from meshbox.config import (
+            RATE_LIMIT_CONGESTION_THRESHOLD,
+            RATE_LIMIT_LATENCY_THRESHOLD_MS,
+        )
+        
+        if queue_depth > RATE_LIMIT_CONGESTION_THRESHOLD or latency_ms > RATE_LIMIT_LATENCY_THRESHOLD_MS:
+            self._current_refill_rate = max(self.min_refill_rate, self._current_refill_rate * 0.8)
+        else:
+            self._current_refill_rate = min(self.max_refill_rate, self._current_refill_rate * 1.1)
+
+    def get_refill_rate(self) -> float:
+        """Get current refill rate."""
+        return self._current_refill_rate
+
+    def allow(self, key: str, priority: int = PRIORITY_DIRECT) -> bool:
+        """Check if a request from this key is allowed, considering priority."""
+        now = time.time()
+        
+        if priority in self._priority_limits:
+            max_requests = self._priority_limits[priority]
+        else:
+            max_requests = self._priority_limits[PRIORITY_DIRECT]
+        
+        bucket = self._buckets[key]
+        self._buckets[key] = [t for t in bucket if now - t < self.window]
+        bucket = self._buckets[key]
+        
+        if len(bucket) >= max_requests:
+            return False
+        
+        bucket.append(now)
+        return True
+
+    def cleanup(self):
+        """Remove empty buckets."""
+        now = time.time()
+        empty_keys = [
+            k for k, v in self._buckets.items()
+            if all(now - t >= self.window for t in v)
+        ]
+        for k in empty_keys:
+            del self._buckets[k]
+
+    def get_bucket_info(self, key: str, priority: int = PRIORITY_DIRECT) -> dict:
+        """Get bucket info for observability."""
+        now = time.time()
+        bucket = self._buckets.get(key, [])
+        active = [t for t in bucket if now - t < self.window]
+        
+        if priority in self._priority_limits:
+            max_requests = self._priority_limits[priority]
+        else:
+            max_requests = self._priority_limits[PRIORITY_DIRECT]
+        
+        return {
+            "key": key,
+            "current": len(active),
+            "max": max_requests,
+            "refill_rate": self._current_refill_rate,
+            "queue_depth": self._queue_depth,
+            "latency_ms": self._recent_latency_ms,
+        }
 
 
 class RateLimiter:
@@ -617,11 +862,18 @@ class MessageTransport:
         self._server = None
         self.connection_limiter = RateLimiter(MAX_CONNECTIONS_PER_IP, 60)
         self.message_limiter = RateLimiter(MAX_MESSAGES_PER_PEER, 60)
+        self.adaptive_limiter: Optional[AdaptiveRateLimiter] = None
+        if RATE_LIMIT_ADAPTIVE:
+            self.adaptive_limiter = AdaptiveRateLimiter()
         self.deduplicator = MessageDeduplicator()
         self._bytes_sent = 0
         self._bytes_received = 0
         self._messages_sent = 0
         self._messages_received = 0
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._cb_lock = asyncio.Lock() if asyncio is not None else None
+        self._queue_depth = 0
+        self._recent_latency_ms = 0.0
         # Connection pool: peer_key -> [(reader, writer, last_used)]
         self._conn_pool: dict[str, list[tuple]] = defaultdict(list)
         self._pool_lock = asyncio.Lock() if asyncio is not None else None
@@ -920,6 +1172,45 @@ class MessageTransport:
             except Exception:
                 pass
             raise
+
+    def _get_cb_lock(self):
+        if self._cb_lock is None:
+            self._cb_lock = asyncio.Lock()
+        return self._cb_lock
+
+    async def _get_circuit_breaker(self, peer_key: str) -> CircuitBreaker:
+        """Get or create a circuit breaker for a peer."""
+        async with self._get_cb_lock():
+            if peer_key not in self._circuit_breakers:
+                self._circuit_breakers[peer_key] = CircuitBreaker(peer_key)
+            return self._circuit_breakers[peer_key]
+
+    def get_circuit_state(self, peer_key: str) -> Optional[dict]:
+        """Get circuit breaker state for a peer for observability."""
+        cb = self._circuit_breakers.get(peer_key)
+        if cb:
+            return cb.get_state_for_metrics()
+        return None
+
+    def get_all_circuit_states(self) -> list:
+        """Get all circuit breaker states for observability."""
+        return [cb.get_state_for_metrics() for cb in self._circuit_breakers.values()]
+
+    def update_congestion(self, queue_depth: int, latency_ms: float):
+        """Update congestion signals for adaptive rate limiting."""
+        self._queue_depth = queue_depth
+        self._recent_latency_ms = latency_ms
+        if self.adaptive_limiter:
+            self.adaptive_limiter.update_congestion(queue_depth, latency_ms)
+
+    def get_rate_limit_stats(self) -> dict:
+        """Get rate limiting stats for observability."""
+        stats = {"adaptive_enabled": RATE_LIMIT_ADAPTIVE}
+        if self.adaptive_limiter:
+            stats["current_refill_rate"] = self.adaptive_limiter.get_refill_rate()
+            stats["queue_depth"] = self.adaptive_limiter._queue_depth
+            stats["latency_ms"] = self.adaptive_limiter._recent_latency_ms
+        return stats
 
     def get_bandwidth_stats(self) -> dict:
         return {

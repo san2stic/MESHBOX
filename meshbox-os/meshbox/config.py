@@ -95,5 +95,28 @@ MAX_HOPS = 20                     # max routing hops
 # ── Keepalive ──────────────────────────────────────────────────
 KEEPALIVE_INTERVAL = 60           # seconds
 ROUTE_BROADCAST_INTERVAL = 120    # seconds
-PEER_DISCOVERY_INTERVAL = 300     # seconds
-CLEANUP_INTERVAL = 180            # seconds
+PEER_DISCOVERY_INTERVAL = 300    # seconds
+CLEANUP_INTERVAL = 180           # seconds
+
+# ── Circuit Breaker ────────────────────────────────────────────
+CIRCUIT_BREAKER_ENABLED = True
+CB_FAILURE_THRESHOLD = 5          # failures before opening circuit
+CB_RECOVERY_TIMEOUT = 30          # seconds before trying HALF_OPEN
+CB_HALF_OPEN_PROBE_COUNT = 3      # probes needed to close circuit
+CB_WINDOW_SIZE = 60              # sliding window in seconds
+
+# ── Adaptive Rate Limiting ───────────────────────────────────────
+RATE_LIMIT_ADAPTIVE = True
+RATE_LIMIT_BASE_REFILLS_PER_SEC = 10
+RATE_LIMIT_MIN_REFILLS_PER_SEC = 1
+RATE_LIMIT_MAX_REFILLS_PER_SEC = 100
+RATE_LIMIT_CONGESTION_THRESHOLD = 1000  # queue depth for tightening
+RATE_LIMIT_LATENCY_THRESHOLD_MS = 100   # latency for tightening
+
+# ── Priority-based rate limits ──────────────────────────────────
+RATE_LIMIT_SOS_PER_MIN = 500
+RATE_LIMIT_RECEIPT_PER_MIN = 500
+RATE_LIMIT_DIRECT_PER_MIN = 100
+RATE_LIMIT_CHANNEL_PER_MIN = 50
+RATE_LIMIT_FILE_PER_MIN = 20
+RATE_LIMIT_RELAY_PER_MIN = 30
