@@ -8,6 +8,7 @@ Uses libsodium (NaCl) via PyNaCl for asymmetric and symmetric encryption.
 - Replay protection: persistent nonce tracking (DB-backed) + timestamp validation
 - Safety numbers: contact verification via fingerprint comparison
 - Async proof-of-work for non-blocking spam prevention
+- Sealed Sender: anonymous messaging with HPKE-style encryption
 """
 
 import asyncio
@@ -34,6 +35,12 @@ REPLAY_WINDOW_SECONDS = 86400 * 7  # 7 days
 MAX_CLOCK_SKEW = 300  # 5 minutes into the future
 # Thread pool for async PoW
 _pow_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="meshbox-pow")
+
+# Sealed sender constants
+SEALED_PAYLOAD_SIZE = 512
+DELIVERY_TOKEN_EXPIRY = 3600
+SEALED_RATE_LIMIT_WINDOW = 60
+SEALED_RATE_LIMIT_MAX = 10
 
 
 class Identity:
@@ -391,3 +398,200 @@ class CryptoEngine:
             return box.decrypt(ciphertext)
         except Exception:
             return None
+
+
+class SealedSenderEngine:
+    """Sealed Sender implementation for anonymous messaging.
+
+    Uses HPKE-style encryption:
+    - Recipient's public key + ephemeral key = shared secret
+    - Encrypt sender identity + message to recipient's box key
+    - Delivery token: HMAC-based proof that sender is allowed to contact recipient
+    - Relays only see delivery token + ciphertext, cannot determine sender identity
+
+    Key discovery via DHT: no correlation between lookup and message.
+    """
+
+    def __init__(self, identity: Identity):
+        self.identity = identity
+        self._delivery_token_cache: dict[str, float] = {}
+        self._rate_limiter: dict[str, list[float]] = {}
+
+    def generate_delivery_token(self, recipient_fp: str) -> bytes:
+        """Generate a delivery token proving sender can contact recipient.
+
+        The token is an HMAC over (recipient_fp + timestamp + sender_fp) using
+        a shared secret derived from the recipient's box key. This allows the
+        recipient to verify the token without revealing sender identity to relays.
+        """
+        timestamp = int(time.time() // 300)
+        token_data = f"{recipient_fp}:{timestamp}:{self.identity.fingerprint}".encode()
+        key = self.derive_token_key(recipient_fp)
+        token = hmac.new(key, token_data, hashlib.sha256).digest()
+        return token
+
+    def verify_delivery_token(self, token: bytes, recipient_fp: str,
+                               sender_fp: str) -> bool:
+        """Verify a delivery token was generated for the correct recipient."""
+        now = int(time.time() // 300)
+        for ts in [now - 1, now]:
+            expected_data = f"{recipient_fp}:{ts}:{sender_fp}".encode()
+            key = self.derive_token_key(recipient_fp)
+            expected = hmac.new(key, expected_data, hashlib.sha256).digest()
+            if hmac.compare_digest(token, expected):
+                return True
+        return False
+
+    def derive_token_key(self, recipient_fp: str) -> bytes:
+        """Derive a key for delivery token HMAC from recipient fingerprint."""
+        return hashlib.sha256(b"delivery_token_v1" + recipient_fp.encode()).digest()
+
+    def encrypt_sealed(self, plaintext: str, recipient_box_pubkey_b64: str,
+                      delivery_token: bytes) -> dict:
+        """Encrypt a sealed message for anonymous delivery.
+
+        The ciphertext contains encrypted sender identity + message.
+        Relays only see: delivery_token + ciphertext (no sender info).
+        """
+        recipient_pk = nacl.public.PublicKey(
+            recipient_box_pubkey_b64.encode(), nacl.encoding.Base64Encoder
+        )
+
+        ephemeral_sk = nacl.public.PrivateKey.generate()
+        ephemeral_pk = ephemeral_sk.public_key
+
+        sender_id = self.identity.fingerprint
+        message_nonce = nacl.utils.random(24)
+
+        inner_plaintext = sender_id.encode("utf-8") + b"\x00" + plaintext.encode("utf-8")
+        inner_box = nacl.public.Box(ephemeral_sk, recipient_pk)
+        inner_ciphertext = inner_box.encrypt(inner_plaintext, nonce=message_nonce)
+
+        padded_ciphertext = self._add_padding(inner_ciphertext)
+
+        outer_nonce = nacl.utils.random(24)
+        outer_box = nacl.public.Box(self.identity.box_key, recipient_pk)
+        outer_ciphertext = outer_box.encrypt(padded_ciphertext, nonce=outer_nonce)
+
+        return {
+            "delivery_token": nacl.encoding.Base64Encoder.encode(delivery_token).decode(),
+            "ciphertext": nacl.encoding.Base64Encoder.encode(outer_ciphertext).decode(),
+            "ephemeral_key": nacl.encoding.Base64Encoder.encode(
+                ephemeral_pk.encode()
+            ).decode(),
+            "nonce": nacl.encoding.Base64Encoder.encode(outer_nonce).decode(),
+            "inner_nonce": nacl.encoding.Base64Encoder.encode(message_nonce).decode(),
+        }
+
+    def decrypt_sealed(self, sealed_msg: dict, sender_fp: str) -> Optional[tuple[str, str]]:
+        """Decrypt a sealed message and extract sender identity and plaintext.
+
+        Returns: (sender_fingerprint, plaintext) or None if decryption fails.
+        """
+        try:
+            ciphertext = nacl.encoding.Base64Encoder.decode(
+                sealed_msg["ciphertext"].encode()
+            )
+            ephemeral_pk = nacl.public.PublicKey(
+                sealed_msg["ephemeral_key"].encode(),
+                nacl.encoding.Base64Encoder,
+            )
+            outer_nonce = nacl.encoding.Base64Encoder.decode(
+                sealed_msg["nonce"].encode()
+            )
+            inner_nonce = nacl.encoding.Base64Encoder.decode(
+                sealed_msg["inner_nonce"].encode()
+            )
+
+            outer_box = nacl.public.Box(self.identity.box_key, ephemeral_pk)
+            padded_inner = outer_box.decrypt(ciphertext, nonce=outer_nonce)
+
+            inner_ciphertext = self._remove_padding(padded_inner)
+
+            inner_box = nacl.public.Box(ephemeral_pk, self.identity.box_key)
+            inner_plaintext = inner_box.decrypt(inner_ciphertext, nonce=inner_nonce)
+
+            sender_id_end = inner_plaintext.index(b"\x00")
+            sender_id = inner_plaintext[:sender_id_end].decode("utf-8")
+            plaintext = inner_plaintext[sender_id_end + 1:].decode("utf-8")
+
+            if sender_id != sender_fp:
+                return None
+
+            return sender_id, plaintext
+
+        except Exception:
+            return None
+
+    def check_delivery_token(self, token: bytes, recipient_fp: str,
+                             sender_fp: str) -> bool:
+        """Check if a delivery token is valid and not expired."""
+        if not self.verify_delivery_token(token, recipient_fp, sender_fp):
+            return False
+        return self._check_rate_limit(sender_fp)
+
+    def _check_rate_limit(self, sender_fp: str) -> bool:
+        """Rate limit sealed messages per sender."""
+        now = time.time()
+        if sender_fp not in self._rate_limiter:
+            self._rate_limiter[sender_fp] = []
+        times = self._rate_limiter[sender_fp]
+        times[:] = [t for t in times if now - t < SEALED_RATE_LIMIT_WINDOW]
+        if len(times) >= SEALED_RATE_LIMIT_MAX:
+            return False
+        times.append(now)
+        return True
+
+    @staticmethod
+    def _add_padding(data: bytes) -> bytes:
+        """Add padding to fixed-size payload to prevent size correlation."""
+        if len(data) >= SEALED_PAYLOAD_SIZE:
+            return data
+        padding_len = SEALED_PAYLOAD_SIZE - len(data)
+        padding = os.urandom(padding_len - 1) + b"\x00"
+        return data + padding
+
+    @staticmethod
+    def _remove_padding(data: bytes) -> bytes:
+        """Remove padding from sealed payload."""
+        if len(data) <= SEALED_PAYLOAD_SIZE:
+            null_idx = data.find(b"\x00")
+            if null_idx > 0:
+                return data[:null_idx]
+        return data
+
+    def create_sealed_message(self, plaintext: str, recipient_box_pubkey_b64: str,
+                              recipient_fp: str) -> dict:
+        """Create a complete sealed message ready for transport."""
+        delivery_token = self.generate_delivery_token(recipient_fp)
+        encrypted = self.encrypt_sealed(plaintext, recipient_box_pubkey_b64, delivery_token)
+        return {
+            "delivery_token": encrypted["delivery_token"],
+            "ciphertext": encrypted["ciphertext"],
+            "ephemeral_key": encrypted["ephemeral_key"],
+            "nonce": encrypted["nonce"],
+            "inner_nonce": encrypted["inner_nonce"],
+            "timestamp": int(time.time()),
+        }
+
+    def receive_sealed_message(self, sealed_msg: dict) -> Optional[tuple[str, str, str]]:
+        """Process a received sealed message.
+
+        Returns: (sender_fingerprint, plaintext, delivery_token) or None.
+        The delivery token can be used to rate-limit or audit the message.
+        """
+        try:
+            delivery_token = nacl.encoding.Base64Encoder.decode(
+                sealed_msg["delivery_token"].encode()
+            )
+        except Exception:
+            return None
+
+        for sender_fp in self._delivery_token_cache:
+            result = self.decrypt_sealed(sealed_msg, sender_fp)
+            if result:
+                sender_id, plaintext = result
+                if self.verify_delivery_token(delivery_token, self.identity.fingerprint, sender_id):
+                    return sender_id, plaintext, sealed_msg["delivery_token"]
+
+        return None

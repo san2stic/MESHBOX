@@ -57,6 +57,7 @@ class MessageType(IntEnum):
     GOSSIP = 0x40
     SYNC_REQ = 0x50
     SYNC_DATA = 0x51
+    SEALED_MSG = 0x60
     ERROR = 0xFF
 
 
