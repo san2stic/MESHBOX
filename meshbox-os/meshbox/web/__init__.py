@@ -1085,6 +1085,60 @@ def create_app(data_dir: Path = None) -> Flask:
             p["time_ago"] = _time_ago(p["last_seen"])
         return jsonify(peers)
 
+    # === Observability endpoints ===
+
+    @app.route("/metrics")
+    def metrics():
+        """Prometheus metrics endpoint."""
+        try:
+            from meshbox.observability import get_metrics_collector
+            collector = get_metrics_collector()
+            metrics_output = collector.generate_metrics()
+            return Response(metrics_output, mimetype='text/plain; version=0.0.8; charset=utf-8')
+        except Exception as e:
+            logger.warning("Failed to generate metrics: %s", e)
+            return Response("# Metrics unavailable", mimetype='text/plain')
+
+    @app.route("/health")
+    def health():
+        """Health check endpoint - returns component status."""
+        try:
+            storage_ok = False
+            try:
+                storage.get_stats()
+                storage_ok = True
+            except Exception:
+                pass
+
+            profile_ok = profile_mgr.is_initialized
+
+            components = {
+                "storage": "healthy" if storage_ok else "unhealthy",
+                "profile": "healthy" if profile_ok else "unhealthy",
+                "web": "healthy",
+            }
+
+            all_healthy = storage_ok and profile_ok
+
+            return jsonify({
+                "status": "healthy" if all_healthy else "degraded",
+                "components": components,
+            }), 200 if all_healthy else 503
+        except Exception as e:
+            logger.warning("Health check failed: %s", e)
+            return jsonify({
+                "status": "unhealthy",
+                "error": str(e),
+            }), 503
+
+    @app.route("/ready")
+    def ready():
+        """Readiness check - returns 200 when daemon is fully initialized."""
+        if not profile_mgr.is_initialized:
+            return jsonify({"ready": False, "reason": "profile_not_initialized"}), 503
+
+        return jsonify({"ready": True})
+
     return app
 
 
