@@ -258,6 +258,42 @@ class StorageEngine:
                     ON tor_peers(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
+
+                -- v5: Group encryption with sender keys
+                CREATE TABLE IF NOT EXISTS groups (
+                    group_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    creator_fingerprint TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    epoch INTEGER DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS group_members (
+                    group_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    role TEXT DEFAULT 'member',
+                    joined_at INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, fingerprint),
+                    FOREIGN KEY (group_id) REFERENCES groups(group_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS group_sender_keys (
+                    group_id TEXT NOT NULL,
+                    sender_fingerprint TEXT NOT NULL,
+                    chain_key TEXT NOT NULL,
+                    signature_key TEXT NOT NULL,
+                    epoch INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, sender_fingerprint),
+                    FOREIGN KEY (group_id) REFERENCES groups(group_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_group_members_group
+                    ON group_members(group_id);
+                CREATE INDEX IF NOT EXISTS idx_group_sender_keys_group
+                    ON group_sender_keys(group_id);
             """)
             # Migration: add columns if upgrading from older schema
             try:
@@ -1051,3 +1087,87 @@ class StorageEngine:
         with self._transaction() as conn:
             conn.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
+    # === Groups with Sender Keys ===
+
+    def create_group(self, group_id: str, name: str, creator_fingerprint: str):
+        with self._transaction() as conn:
+            now = int(time.time())
+            conn.execute("""
+                INSERT INTO groups (group_id, name, creator_fingerprint, created_at, updated_at, epoch)
+                VALUES (?, ?, ?, ?, ?, 1)
+            """, (group_id, name, creator_fingerprint, now, now))
+            conn.execute("""
+                INSERT INTO group_members (group_id, fingerprint, role, joined_at)
+                VALUES (?, ?, 'admin', ?)
+            """, (group_id, creator_fingerprint, now))
+
+    def get_group(self, group_id: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM groups WHERE group_id = ?", (group_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_groups(self) -> list:
+        conn = self._get_conn()
+        rows = conn.execute("SELECT * FROM groups ORDER BY updated_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_group_epoch(self, group_id: str, epoch: int):
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE groups SET epoch = ?, updated_at = ? WHERE group_id = ?",
+                (epoch, int(time.time()), group_id),
+            )
+
+    def add_group_member(self, group_id: str, fingerprint: str, role: str = "member"):
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO group_members (group_id, fingerprint, role, joined_at)
+                VALUES (?, ?, ?, ?)
+            """, (group_id, fingerprint, role, int(time.time())))
+
+    def remove_group_member(self, group_id: str, fingerprint: str) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "DELETE FROM group_members WHERE group_id = ? AND fingerprint = ?",
+                (group_id, fingerprint),
+            )
+            return result.rowcount > 0
+
+    def get_group_members(self, group_id: str) -> list:
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT * FROM group_members WHERE group_id = ? ORDER BY joined_at
+        """, (group_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_sender_key(self, group_id: str, sender_fingerprint: str,
+                      chain_key: str, signature_key: str, epoch: int):
+        with self._transaction() as conn:
+            now = int(time.time())
+            conn.execute("""
+                INSERT OR REPLACE INTO group_sender_keys
+                (group_id, sender_fingerprint, chain_key, signature_key, epoch, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (group_id, sender_fingerprint, chain_key, signature_key, epoch, now, now))
+
+    def get_sender_key(self, group_id: str, sender_fingerprint: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT * FROM group_sender_keys WHERE group_id = ? AND sender_fingerprint = ?
+        """, (group_id, sender_fingerprint)).fetchone()
+        return dict(row) if row else None
+
+    def get_group_sender_keys(self, group_id: str) -> list:
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT * FROM group_sender_keys WHERE group_id = ?
+        """, (group_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_sender_key(self, group_id: str, sender_fingerprint: str):
+        with self._transaction() as conn:
+            conn.execute(
+                "DELETE FROM group_sender_keys WHERE group_id = ? AND sender_fingerprint = ?",
+                (group_id, sender_fingerprint),
+            )
