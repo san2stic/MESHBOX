@@ -1,0 +1,1281 @@
+openapi: 3.1.0
+info:
+  title: MeshBox SANP API
+  description: |
+    MeshBox is a decentralized, encrypted, offline-first messaging platform using the SANP (SAN Adaptive Network Protocol) for P2P communication over Tor hidden services.
+
+    ## Authentication
+    All endpoints assume local access (127.0.0.1). The API is intended for local administration and integration.
+
+    ## Rate Limits
+    - Default: 100 requests/minute per IP
+    - SOS broadcasts: 10/minute
+
+    ## Error Responses
+    - 400: Bad Request - Invalid parameters
+    - 404: Not Found - Resource doesn't exist
+    - 503: Service Unavailable - Daemon not running
+    - 502: Bad Gateway - Message delivery failed
+  version: 5.0.0
+  contact:
+    name: MeshBox Project
+    url: https://github.com/meshbox-os/meshbox
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local SANP Daemon API
+  - url: http://localhost:8080
+    description: Local Web UI (Flask)
+
+tags:
+  - name: Node
+    description: Node information, status, and statistics
+  - name: Profile
+    description: Local user profile management
+  - name: Peers
+    description: P2P peer management
+  - name: Messages
+    description: Send and receive messages via SANP
+  - name: Contacts
+    description: Contact management
+  - name: SOS
+    description: Emergency broadcast alerts
+  - name: Channels
+    description: Public channel management (SANP gossip)
+  - name: Files
+    description: Encrypted file sharing
+  - name: Network
+    description: Network topology and routing
+  - name: Gossip
+    description: Distributed gossip protocol
+  - name: Health
+    description: System health and readiness
+  - name: Trust
+    description: Trust scoring and reputation
+  - name: Tor
+    description: Tor network peer management
+
+paths:
+  /api/v1/node/info:
+    get:
+      tags:
+        - Node
+      summary: Get node information
+      description: Returns the local node's identity, onion address, version, and uptime.
+      operationId: getNodeInfo
+      responses:
+        '200':
+          description: Node information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeInfo'
+              example:
+                node_id: "a1b2c3d4e5f6g7h8i9j0"
+                onion_address: "abc1234567890.onion"
+                version: "5.0.0"
+                protocol: "SANP v1"
+                uptime: 3600
+                sanp_port: 8081
+                api_port: 8080
+
+  /api/v1/node/stats:
+    get:
+      tags:
+        - Node
+      summary: Get node statistics
+      description: Returns storage and network statistics.
+      operationId: getNodeStats
+      responses:
+        '200':
+          description: Node statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeStats'
+              example:
+                peers_count: 5
+                total_known_peers: 12
+                routes: 8
+                server_connections: 15
+                uptime: 3600
+                messages_count: 150
+                unread_messages: 3
+
+  /api/v1/node/status:
+    get:
+      tags:
+        - Node
+      summary: Get node status
+      description: Returns detailed status of all node components.
+      operationId: getNodeStatus
+      responses:
+        '200':
+          description: Node status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/profile:
+    get:
+      tags:
+        - Profile
+      summary: Get local profile
+      description: Returns the local user's profile.
+      operationId: getProfile
+      responses:
+        '200':
+          description: Profile data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: No profile found
+        '503':
+          description: Service unavailable
+
+    post:
+      tags:
+        - Profile
+      summary: Create local profile
+      description: Creates a new local profile with name and bio.
+      operationId: createProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileCreateRequest'
+            example:
+              name: "Alice"
+              bio: "MeshBox user"
+      responses:
+        '200':
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  fingerprint:
+                    type: string
+                  name:
+                    type: string
+              example:
+                status: "created"
+                fingerprint: "a1b2c3d4e5f6g7h8"
+                name: "Alice"
+        '503':
+          description: Service unavailable
+
+    put:
+      tags:
+        - Profile
+      summary: Update local profile
+      description: Updates the local profile's name and/or bio.
+      operationId: updateProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+            example:
+              name: "Alice Updated"
+              bio: "New bio message"
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+              example:
+                status: "updated"
+        '503':
+          description: Service unavailable
+
+  /api/v1/peers:
+    get:
+      tags:
+        - Peers
+      summary: List all peers
+      description: Returns all known peers including connected and disconnected.
+      operationId: listPeers
+      responses:
+        '200':
+          description: List of peers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Peer'
+              example:
+                - node_id: "peer1abc123def456"
+                  onion_address: "abc123.onion"
+                  connected: true
+                  latency_ms: 150
+                  hops: 2
+                  last_seen: 1700000000
+                - node_id: "peer2abc123def456"
+                  onion_address: "xyz789.onion"
+                  connected: false
+                  latency_ms: 0
+                  hops: 3
+                  last_seen: 1699999999
+
+  /api/v1/peers/{node_id}:
+    get:
+      tags:
+        - Peers
+      summary: Get peer details
+      description: Returns detailed information about a specific peer.
+      operationId: getPeer
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The node ID of the peer
+      responses:
+        '200':
+          description: Peer details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerDetail'
+        '404':
+          description: Peer not found
+
+  /api/v1/peers/add:
+    post:
+      tags:
+        - Peers
+      summary: Add a new peer
+      description: Queues a new Tor peer for connection.
+      operationId: addPeer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeerAddRequest'
+            example:
+              onion_address: "newpeer123456.onion"
+      responses:
+        '200':
+          description: Peer queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  onion_address:
+                    type: string
+              example:
+                status: "queued"
+                onion_address: "newpeer123456.onion"
+        '503':
+          description: Service unavailable
+
+  /api/v1/message/send:
+    post:
+      tags:
+        - Messages
+      summary: Send a message
+      description: Sends an encrypted message to a recipient via SANP.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            example:
+              to: "recipient123456"
+              content: "Hello, this is a test message!"
+              disappear_after_read: false
+              disappear_timer: 0
+      responses:
+        '200':
+          description: Message sent successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message_id:
+                    type: string
+              example:
+                status: "sent"
+                message_id: "msg-abc123"
+        '502':
+          description: Message delivery failed
+
+  /api/v1/messages/inbox:
+    get:
+      tags:
+        - Messages
+      summary: Get inbox messages
+      description: Returns received messages, optionally filtered by unread status.
+      operationId: getInbox
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+          description: Maximum number of messages to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+          description: Offset for pagination
+        - name: unread
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Filter to only unread messages
+      responses:
+        '200':
+          description: Inbox messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  total:
+                    type: integer
+        '503':
+          description: Service unavailable
+
+  /api/v1/messages/outbox:
+    get:
+      tags:
+        - Messages
+      summary: Get outbox messages
+      description: Returns sent messages.
+      operationId: getOutbox
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Outbox messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  total:
+                    type: integer
+
+  /api/v1/messages/{message_id}:
+    get:
+      tags:
+        - Messages
+      summary: Read a message
+      description: Returns and marks a message as read.
+      operationId: readMessage
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message content
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '404':
+          description: Message not found
+
+    delete:
+      tags:
+        - Messages
+      summary: Delete a message
+      description: Permanently deletes a message.
+      operationId: deleteMessage
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message_id:
+                    type: string
+              example:
+                status: "deleted"
+                message_id: "msg-abc123"
+
+  /api/v1/messages/search/{query}:
+    get:
+      tags:
+        - Messages
+      summary: Search messages
+      description: Searches inbox messages for the given query.
+      operationId: searchMessages
+      parameters:
+        - name: query
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Search query string
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+
+  /api/v1/contacts:
+    get:
+      tags:
+        - Contacts
+      summary: List all contacts
+      description: Returns all contacts (excluding local profile).
+      operationId: listContacts
+      responses:
+        '200':
+          description: List of contacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Contact'
+
+    post:
+      tags:
+        - Contacts
+      summary: Add a contact
+      description: Adds a new contact to the address book.
+      operationId: addContact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContactAddRequest'
+            example:
+              fingerprint: "contact123abc456"
+              name: "Bob"
+              verify_key: "abc123def456..."
+              box_public_key: "xyz789..."
+              bio: "Friend from mesh network"
+      responses:
+        '200':
+          description: Contact added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  fingerprint:
+                    type: string
+
+  /api/v1/contacts/{fingerprint}:
+    delete:
+      tags:
+        - Contacts
+      summary: Remove a contact
+      description: Removes a contact by fingerprint.
+      operationId: removeContact
+      parameters:
+        - name: fingerprint
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contact removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  fingerprint:
+                    type: string
+
+  /api/v1/sos:
+    get:
+      tags:
+        - SOS
+      summary: List active SOS alerts
+      description: Returns all active SOS alerts.
+      operationId: listSos
+      responses:
+        '200':
+          description: Active SOS alerts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SOSAlert'
+
+    post:
+      tags:
+        - SOS
+      summary: Broadcast SOS alert
+      description: Broadcasts an emergency SOS alert via SANP gossip.
+      operationId: broadcastSos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SOSRequest'
+            example:
+              message: "Emergency: Need help at location"
+              severity: "high"
+              latitude: 40.7128
+              longitude: -74.0060
+      responses:
+        '200':
+          description: SOS broadcast initiated
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/channels:
+    get:
+      tags:
+        - Channels
+      summary: List all channels
+      description: Returns all known public channels.
+      operationId: listChannels
+      responses:
+        '200':
+          description: List of channels
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Channel'
+
+    post:
+      tags:
+        - Channels
+      summary: Create a channel
+      description: Creates a new public channel.
+      operationId: createChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelCreateRequest'
+            example:
+              name: "general"
+              description: "General discussion channel"
+      responses:
+        '200':
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+
+  /api/v1/channels/{channel_id}:
+    get:
+      tags:
+        - Channels
+      summary: Get channel details
+      description: Returns information about a specific channel.
+      operationId: getChannel
+      parameters:
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Channel details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '404':
+          description: Channel not found
+
+  /api/v1/channels/{channel_id}/post:
+    post:
+      tags:
+        - Channels
+      summary: Post to channel
+      description: Posts a message to a channel.
+      operationId: postToChannel
+      parameters:
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelPostRequest'
+            example:
+              content: "Hello from the channel!"
+      responses:
+        '200':
+          description: Message posted
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/channels/{channel_id}/messages:
+    get:
+      tags:
+        - Channels
+      summary: Get channel messages
+      description: Returns messages from a channel.
+      operationId: channelMessages
+      parameters:
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Channel messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/v1/files:
+    get:
+      tags:
+        - Files
+      summary: List files
+      description: Returns lists of sent and received files.
+      operationId: listFiles
+      responses:
+        '200':
+          description: File lists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  my_files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/File'
+                  received:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/File'
+
+  /api/v1/network/topology:
+    get:
+      tags:
+        - Network
+      summary: Get network topology
+      description: Returns the current network topology view.
+      operationId: networkTopology
+      responses:
+        '200':
+          description: Network topology
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  local_node_id:
+                    type: string
+                  routes:
+                    type: array
+                    items:
+                      type: object
+                  total:
+                    type: integer
+
+  /api/v1/routing/table:
+    get:
+      tags:
+        - Network
+      summary: Get routing table
+      description: Returns the full routing table.
+      operationId: routingTable
+      responses:
+        '200':
+          description: Routing table entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/v1/gossip/publish:
+    post:
+      tags:
+        - Gossip
+      summary: Publish to gossip
+      description: Publishes data to a gossip topic.
+      operationId: gossipPublish
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GossipPublishRequest'
+            example:
+              topic: "announcements"
+              data:
+                message: "Network update available"
+      responses:
+        '200':
+          description: Message published
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  msg_id:
+                    type: string
+
+  /api/v1/health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Returns the health status of the node.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: "ok"
+                protocol: "SANP v1"
+                tor: true
+                peers: 5
+
+  /api/v1/trust/{fingerprint}:
+    get:
+      tags:
+        - Trust
+      summary: Get trust score
+      description: Returns the trust score for a peer.
+      operationId: getTrust
+      parameters:
+        - name: fingerprint
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Trust score
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fingerprint:
+                    type: string
+                  score:
+                    type: number
+                    format: float
+
+  /api/v1/tor/peers:
+    get:
+      tags:
+        - Tor
+      summary: List Tor peers
+      description: Returns Tor network peers, optionally filtering to active only.
+      operationId: listTorPeers
+      parameters:
+        - name: active
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Filter to active peers only
+      responses:
+        '200':
+          description: Tor peer list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+components:
+  schemas:
+    NodeInfo:
+      type: object
+      properties:
+        node_id:
+          type: string
+          description: Unique node identifier
+        onion_address:
+          type: string
+          description: Tor hidden service address
+        version:
+          type: string
+          description: MeshBox version
+        protocol:
+          type: string
+          description: SANP protocol version
+        uptime:
+          type: integer
+          description: Seconds since node started
+        sanp_port:
+          type: integer
+          description: SANP listener port
+        api_port:
+          type: integer
+          description: API server port
+
+    NodeStats:
+      type: object
+      properties:
+        peers_count:
+          type: integer
+          description: Number of connected peers
+        total_known_peers:
+          type: integer
+          description: Total known peers in database
+        routes:
+          type: integer
+          description: Number of routes in routing table
+        server_connections:
+          type: integer
+          description: Active server connections
+        uptime:
+          type: integer
+          description: Node uptime in seconds
+        messages_count:
+          type: integer
+          description: Total messages in storage
+        unread_messages:
+          type: integer
+          description: Unread message count
+
+    Profile:
+      type: object
+      properties:
+        fingerprint:
+          type: string
+          description: Profile identifier (first 16 chars of node_id)
+        name:
+          type: string
+          description: Profile display name
+        bio:
+          type: string
+          description: Profile bio/description
+        verify_key:
+          type: string
+          description: Ed25519 verification key
+        box_public_key:
+          type: string
+          description: X25519 public key for encryption
+        is_local:
+          type: integer
+          description: 1 if local profile, 0 if contact
+        created_at:
+          type: integer
+          description: Unix timestamp of profile creation
+
+    ProfileCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: string
+          default: ""
+
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        bio:
+          type: string
+
+    Peer:
+      type: object
+      properties:
+        node_id:
+          type: string
+          description: Unique peer identifier
+        onion_address:
+          type: string
+          description: Tor hidden service address
+        connected:
+          type: boolean
+          description: Whether peer is currently connected
+        latency_ms:
+          type: integer
+          description: Round-trip latency in milliseconds
+        hops:
+          type: integer
+          description: Number of hops to reach peer
+        last_seen:
+          type: integer
+          description: Unix timestamp of last activity
+
+    PeerDetail:
+      allOf:
+        - $ref: '#/components/schemas/Peer'
+        - type: object
+          properties:
+            failed_attempts:
+              type: integer
+              description: Number of failed connection attempts
+
+    PeerAddRequest:
+      type: object
+      required:
+        - onion_address
+      properties:
+        onion_address:
+          type: string
+          description: Tor onion address of peer
+
+    SendMessageRequest:
+      type: object
+      required:
+        - to
+        - content
+      properties:
+        to:
+          type: string
+          description: Recipient node ID
+        content:
+          type: string
+          description: Message plaintext content
+        disappear_after_read:
+          type: boolean
+          default: false
+          description: Enable disappearing messages
+        disappear_timer:
+          type: integer
+          default: 0
+          description: Disappear timer in seconds (5, 30, 60, 3600, etc.)
+
+    Message:
+      type: object
+      properties:
+        message_id:
+          type: string
+          description: Unique message identifier
+        sender_fingerprint:
+          type: string
+          description: Sender's profile fingerprint
+        recipient_fingerprint:
+          type: string
+          description: Recipient's profile fingerprint
+        encrypted_payload:
+          type: object
+          description: Encrypted message content
+        timestamp:
+          type: integer
+          description: Unix timestamp when message was sent
+        read:
+          type: boolean
+          description: Whether message has been read
+        delivery_status:
+          type: string
+          description: Delivery status (queued, sent, delivered)
+
+    Contact:
+      type: object
+      properties:
+        fingerprint:
+          type: string
+          description: Contact's profile fingerprint
+        name:
+          type: string
+          description: Contact's display name
+        bio:
+          type: string
+          description: Contact's bio
+        verify_key:
+          type: string
+          description: Ed25519 verification key
+        box_public_key:
+          type: string
+          description: X25519 public key for encryption
+        last_seen:
+          type: integer
+          description: Unix timestamp of last activity
+
+    ContactAddRequest:
+      type: object
+      required:
+        - fingerprint
+        - name
+        - verify_key
+        - box_public_key
+      properties:
+        fingerprint:
+          type: string
+        name:
+          type: string
+        verify_key:
+          type: string
+        box_public_key:
+          type: string
+        bio:
+          type: string
+          default: ""
+
+    SOSAlert:
+      type: object
+      properties:
+        alert_id:
+          type: string
+          description: Unique alert identifier
+        sender_fingerprint:
+          type: string
+          description: Sender's fingerprint
+        message:
+          type: string
+          description: SOS message content
+        severity:
+          type: string
+          description: Alert severity (low, medium, high, critical)
+        latitude:
+          type: number
+          format: double
+          description: Optional GPS latitude
+        longitude:
+          type: number
+          format: double
+          description: Optional GPS longitude
+        timestamp:
+          type: integer
+          description: Unix timestamp
+        ttl:
+          type: integer
+          description: Time-to-live in seconds
+        active:
+          type: boolean
+          description: Whether alert is currently active
+
+    SOSRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: SOS alert message
+        severity:
+          type: string
+          default: "high"
+          description: Alert severity level
+        latitude:
+          type: number
+          format: double
+          description: Optional GPS latitude
+        longitude:
+          type: number
+          format: double
+          description: Optional GPS longitude
+
+    Channel:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Unique channel identifier
+        name:
+          type: string
+          description: Channel name
+        description:
+          type: string
+          description: Channel description
+        creator_fingerprint:
+          type: string
+          description: Creator's fingerprint
+        is_public:
+          type: integer
+          description: 1 if public, 0 if private
+        created_at:
+          type: integer
+          description: Unix timestamp of creation
+
+    ChannelCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 50
+        description:
+          type: string
+          default: ""
+
+    ChannelPostRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: Message content to post
+
+    File:
+      type: object
+      properties:
+        file_id:
+          type: string
+          description: Unique file identifier
+        filename:
+          type: string
+          description: Original filename
+        file_size:
+          type: integer
+          description: File size in bytes
+        mime_type:
+          type: string
+          description: MIME type
+        checksum:
+          type: string
+          description: SHA-256 checksum
+        sender_fingerprint:
+          type: string
+          description: Sender's fingerprint
+        recipient_fingerprint:
+          type: string
+          description: Recipient's fingerprint (empty for public)
+        timestamp:
+          type: integer
+          description: Unix timestamp
+        is_public:
+          type: boolean
+          description: Whether file is publicly accessible
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: ["ok", "degraded", "error"]
+        protocol:
+          type: string
+          description: SANP protocol version
+        tor:
+          type: boolean
+          description: Whether Tor is ready
+        peers:
+          type: integer
+          description: Number of connected peers
+
+    GossipPublishRequest:
+      type: object
+      required:
+        - topic
+        - data
+      properties:
+        topic:
+          type: string
+          description: Gossip topic name
+        data:
+          type: object
+          description: Arbitrary data to publish
+
+  securitySchemes:
+    LocalAccess:
+      type: apiKey
+      in: header
+      name: X-Local-Access
+      description: Local access key (if configured)
+
+externalDocs:
+  description: SANP Protocol Documentation
+  url: /docs/sanp_protocol.md
