@@ -391,3 +391,108 @@ class CryptoEngine:
             return box.decrypt(ciphertext)
         except Exception:
             return None
+
+
+class DeniabilityManager:
+    """Manages OTR-style deniable messaging.
+
+    In deniable mode, messages are authenticated with per-message MAC keys
+    derived from a chain key. After delivery receipt, the MAC key is revealed,
+    making the message repudiable - any third party with the revealed key can
+    forge equivalent messages, but cannot prove who originally sent it.
+    """
+
+    MAX_REVEALED_KEYS = 1000
+
+    def __init__(self, storage=None):
+        self._storage = storage
+        self._chain_key: Optional[bytes] = None
+        self._pending_reveals: dict[str, float] = {}
+        self._revealed_keys: dict[str, bytes] = {}
+        self._deniability_enabled = True
+
+    def initialize_chain(self, shared_secret: bytes) -> None:
+        """Initialize the MAC chain key from a shared secret."""
+        self._chain_key = hashlib.sha256(b"deniability-mac-chain" + shared_secret).digest()
+
+    def derive_mac_key(self, message_id: bytes) -> bytes:
+        """Derive a per-message MAC key from the current chain key."""
+        if self._chain_key is None:
+            raise RuntimeError("Chain key not initialized")
+        mac_key = hashlib.sha256(self._chain_key + message_id).digest()
+        self._chain_key = hashlib.sha256(b"mac-chain-step" + self._chain_key).digest()
+        return mac_key
+
+    def create_mac(self, message_id: bytes, plaintext: bytes) -> bytes:
+        """Create a MAC for a message using the derived MAC key."""
+        mac_key = self.derive_mac_key(message_id)
+        return hmac.new(mac_key, plaintext, hashlib.sha256).digest()
+
+    def verify_mac(self, message_id: bytes, plaintext: bytes, mac: bytes) -> bool:
+        """Verify a message MAC using the derived MAC key."""
+        expected_mac = self.create_mac(message_id, plaintext)
+        return hmac.compare_digest(mac, expected_mac)
+
+    def schedule_reveal(self, message_id: str, mac_key: bytes) -> None:
+        """Schedule a MAC key for revelation after delivery receipt."""
+        self._pending_reveals[message_id] = time.time()
+        self._revealed_keys[message_id] = mac_key
+        self._enforce_key_limit()
+
+    def reveal_mac_key(self, message_id: str) -> Optional[bytes]:
+        """Return the MAC key for a previously sent message."""
+        return self._revealed_keys.get(message_id)
+
+    def mark_delivered(self, message_id: str) -> None:
+        """Mark a message as delivered - reveals the MAC key."""
+        if message_id in self._pending_reveals:
+            del self._pending_reveals[message_id]
+            if self._storage:
+                self._store_revealed_key(message_id, self._revealed_keys.get(message_id))
+
+    def get_revealed_key(self, message_id: str) -> Optional[bytes]:
+        """Get a revealed MAC key (from memory or storage)."""
+        key = self._revealed_keys.get(message_id)
+        if key is None and self._storage:
+            key = self._storage.get_revealed_mac_key(message_id)
+        return key
+
+    def share_key_with_third_party(self, message_id: str) -> Optional[dict]:
+        """Share a revealed MAC key with a third party for deniability verification."""
+        key = self.get_revealed_key(message_id)
+        if key is None:
+            return None
+        return {
+            "message_id": message_id,
+            "mac_key": nacl.encoding.Base64Encoder.encode(key).decode(),
+            "revealed_at": int(time.time()),
+        }
+
+    def forge_message(self, message_id: bytes, plaintext: bytes, mac_key: bytes) -> bytes:
+        """Forge a deniable message using a revealed MAC key.
+
+        This demonstrates that the revealed key can create valid MACs,
+        proving the original message was not provably authentic.
+        """
+        return hmac.new(mac_key, plaintext, hashlib.sha256).digest()
+
+    def _enforce_key_limit(self) -> None:
+        """Ensure bounded history of revealed keys."""
+        if len(self._revealed_keys) > self.MAX_REVEALED_KEYS:
+            keys_to_remove = sorted(self._revealed_keys.keys())[:len(self._revealed_keys) - self.MAX_REVEALED_KEYS]
+            for k in keys_to_remove:
+                del self._revealed_keys[k]
+
+    def _store_revealed_key(self, message_id: str, mac_key: Optional[bytes]) -> None:
+        """Store revealed MAC key in database."""
+        if mac_key and self._storage:
+            self._storage.save_revealed_mac_key(message_id, mac_key)
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check if deniability mode is enabled."""
+        return self._deniability_enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable deniability mode."""
+        self._deniability_enabled = enabled

@@ -52,6 +52,7 @@ class MessageType(IntEnum):
     PEER_REQUEST = 0x11
     MESSAGE = 0x20
     MESSAGE_ACK = 0x21
+    MAC_KEY_REVEAL = 0x22
     ROUTE = 0x30
     ROUTE_REQ = 0x31
     GOSSIP = 0x40
@@ -199,6 +200,7 @@ class SANPHandshake:
         self.peer_node_id: Optional[str] = None
         self.peer_pubkey_ed25519: Optional[bytes] = None
         self.peer_pubkey_x25519: Optional[bytes] = None
+        self.peer_deniability: bool = False
 
     # -- Initiator side ----------------------------------------------------
 
@@ -213,6 +215,7 @@ class SANPHandshake:
                 nacl.encoding.RawEncoder
             ),
             b"timestamp": int(time.time()),
+            b"deniability": b"v1",
         }
         frame = SANPFrame.make(MessageType.HELLO, payload)
         frame.sign(self.identity.signing_key)
@@ -258,6 +261,7 @@ class SANPHandshake:
                 nacl.encoding.RawEncoder
             ),
             b"timestamp": int(time.time()),
+            b"deniability": b"v1",
         }
         ack = SANPFrame.make(MessageType.HELLO_ACK, payload)
         ack.sign(self.identity.signing_key)

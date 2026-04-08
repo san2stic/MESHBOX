@@ -258,6 +258,13 @@ class StorageEngine:
                     ON tor_peers(last_seen);
                 CREATE INDEX IF NOT EXISTS idx_delivery_receipts_recipient
                     ON delivery_receipts(recipient_fingerprint);
+
+                -- v5: Revealed MAC keys for deniable messaging
+                CREATE TABLE IF NOT EXISTS revealed_mac_keys (
+                    message_id TEXT PRIMARY KEY,
+                    mac_key BLOB NOT NULL,
+                    revealed_at INTEGER NOT NULL
+                );
             """)
             # Migration: add columns if upgrading from older schema
             try:
@@ -1051,3 +1058,33 @@ class StorageEngine:
         with self._transaction() as conn:
             conn.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel_id,))
             conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
+    # === Revealed MAC Keys for Deniability ===
+
+    def save_revealed_mac_key(self, message_id: str, mac_key: bytes):
+        """Store a revealed MAC key for deniable messaging."""
+        with self._transaction() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO revealed_mac_keys (message_id, mac_key, revealed_at)
+                VALUES (?, ?, ?)
+            """, (message_id, mac_key, int(time.time())))
+            self._cleanup_old_mac_keys(conn)
+
+    def get_revealed_mac_key(self, message_id: str) -> Optional[bytes]:
+        """Retrieve a revealed MAC key."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT mac_key FROM revealed_mac_keys WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return row["mac_key"] if row else None
+
+    def _cleanup_old_mac_keys(self, conn, max_keys: int = 1000):
+        """Ensure bounded history of revealed MAC keys."""
+        count = conn.execute("SELECT COUNT(*) FROM revealed_mac_keys").fetchone()[0]
+        if count > max_keys:
+            excess = count - max_keys
+            conn.execute("""
+                DELETE FROM revealed_mac_keys WHERE message_id IN (
+                    SELECT message_id FROM revealed_mac_keys ORDER BY revealed_at ASC LIMIT ?
+                )
+            """, (excess,))
